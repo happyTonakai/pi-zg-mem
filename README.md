@@ -116,7 +116,7 @@ That suite is what [CI](.github/workflows/ci.yml) runs — Python 3.9 / 3.11 / 3
 
 `zg_memory_open`: `session` + `corpus_line` (from a hit's `ref`), `mode=full` (the raw record) or `mode=ctx` (surrounding conversation, `span` messages either side).
 
-The agent also gets a [skill](skills/zg-memory/SKILL.md) telling it **when** to reach for memory — and when not to (a keyword you already know is usually faster with `rg`).
+**When** to reach for memory is spelled out in the tool descriptions themselves — they are always in context, unlike a skill that has to be loaded first. The `mode=auto` routing below decides literal vs. semantic matching.
 
 **`mode=auto` routes by query shape**, which is what makes this reliable rather than merely fuzzy:
 
@@ -216,7 +216,6 @@ extensions/zg-memory/
   zgmem.py           recall + drill-down CLI (query / show / ctx / sessions / refresh)
   tests/             25 offline tests
   README.md          design + corpus format deep dive
-skills/zg-memory/    agent-facing usage guidance
 docs/reviews/        independent review records
 ```
 

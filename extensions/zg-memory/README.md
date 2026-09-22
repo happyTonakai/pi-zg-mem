@@ -39,7 +39,6 @@ zg_memory_open   ←——  回指 JSONL 深钻（thinking / 工具调用 / 扩�
 | `index.ts` | pi extension：注册 2 个工具 + 1 个命令 + 生命周期钩子 |
 | `jsonl2corpus.py` | ETL：JSONL → 干净语料**分片**（一行一条消息 `行号\t角色\t时间\t文本`），维护 `manifest.json` v2（corpus 分片 ↔ JSONL 映射、前缀哈希/offset 变更检测、分片元数据）；原子写 + 文件锁 + 单实例（flock） |
 | `zgmem.py` | 检索与回指：`query / show / ctx / sessions / refresh` |
-| `SKILL.md` | 面向 agent 的使用指引（何时用、怎么选参数） |
 
 ## 给 agent 的工具
 

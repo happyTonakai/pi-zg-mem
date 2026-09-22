@@ -116,7 +116,7 @@ python3 extensions/zg-memory/tests/test_zgmem.py     # 25 个离线用例，不�
 
 `zg_memory_open`：`session` + `corpus_line`（来自命中的 `ref`），`mode=full`（原始记录）或 `mode=ctx`（前后各 `span` 条上下文）。
 
-agent 还会拿到一份 [skill](skills/zg-memory/SKILL.md)，告诉它**什么时候**该用记忆——以及什么时候不该用（你已经知道确切关键词时，直接 `rg` 更快）。
+**什么时候**该用记忆写在工具描述里——它一直在上下文中，不像 skill 还得先被加载。字面还是语义的取舍由下面的 `mode=auto` 路由决定。
 
 **`mode=auto` 按 query 形态路由**，这是它可信而不只是"模糊"的原因：
 
@@ -216,7 +216,6 @@ extensions/zg-memory/
   zgmem.py           召回与回指 CLI（query / show / ctx / sessions / refresh）
   tests/             25 个离线用例
   README.md          设计与语料格式深入说明
-skills/zg-memory/    面向 agent 的使用指引
 docs/reviews/        独立评审记录
 ```
 
