@@ -1,0 +1,25 @@
+{
+  "name": "pi-zg-mem",
+  "version": "0.1.0",
+  "description": "pi 扩展：用 zvec-grep (zg) 给 pi 历史会话建本地索引，提供跨 session 记忆检索 (zg_memory_query / zg_memory_open)",
+  "private": true,
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "memory",
+    "zvec-grep"
+  ],
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "pi": {
+    "extensions": [
+      "./extensions"
+    ],
+    "skills": [
+      "./skills"
+    ]
+  }
+}

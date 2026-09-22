@@ -1,0 +1,13 @@
+# python
+__pycache__/
+*.py[cod]
+.ruff_cache/
+.venv/
+
+# node (tsc 类型检查用的软链，运行时不需要)
+node_modules/
+
+# macos / editor
+.DS_Store
+.idea/
+.vscode/
