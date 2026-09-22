@@ -4,6 +4,9 @@
 用 [zvec-grep](https://github.com/zvec-ai/zvec-grep) (`zg`) 做检索、用原始 JSONL 做
 source of truth，供 agent 在需要历史记忆时**主动召回**。
 
+> 面向使用者的介绍、安装与实测数据见仓库根目录的 [英文 README](../../README.md) · [中文 README](../../README.zh.md)。
+> 本文是**设计与数据格式**的深入说明（为什么分片、manifest 长什么样、增量成本从哪来）。
+
 ```
 ~/.pi/agent/sessions/**/*.jsonl     原始会话（完整：时间/角色/thinking/工具调用）
         │  jsonl2corpus.py（清洗：只留 user/assistant 文本，去掉噪声）
@@ -132,7 +135,9 @@ embedding 模型（无变更时 zg 直接秒退、不加载）。想再降只能
 ## CLI 用法（脱离 pi 也能用）
 
 ```bash
-Z=~/.pi/agent/extensions/zg-memory/zgmem.py
+# 克隆目录下（通过 pi 安装则为
+# ~/.pi/agent/git/github.com/happyTonakai/pi-zg-mem/extensions/zg-memory/zgmem.py）
+Z=./extensions/zg-memory/zgmem.py
 
 python3 $Z query "codegraph 和 zvec 有什么区别" --top 3
 python3 $Z query "上次那个报错码" --mode rg
