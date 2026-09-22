@@ -1,0 +1,107 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    name: tests · py${{ matrix.python }} · ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python: ["3.9", "3.13"]
+        include:
+          - os: ubuntu-latest
+            python: "3.11"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      # 全程不装 zvec-grep / ripgrep: 套件用假 zg 二进制 + 临时数据目录驱动 ETL 与 CLI。
+      # 哪天某个用例开始要求 PATH 上有真的 zg/rg, 这里就会红 —— 正是想要的信号。
+      - name: Run offline test suite
+        run: python3 extensions/zg-memory/tests/test_zgmem.py
+
+      - name: Every script still compiles
+        run: python3 -m py_compile extensions/zg-memory/*.py extensions/zg-memory/tests/*.py
+
+  pipeline:
+    name: ETL → refresh pipeline (no index engine)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      # 端到端跑用户真正会碰到的入口: 建语料 → 无变化 refresh(应 no-op) →
+      # 追加一条后 refresh(应走增量, 只有尾片重嵌) → 列出会话。
+      # 故意不需要 zg: 用一个只认 `zg index . --embedding X` 的假二进制顶上。
+      - name: ETL bootstrap → no-op refresh → incremental refresh
+        run: |
+          set -euo pipefail
+
+          work=$(mktemp -d)
+          export ZGMEM_DIR="$work/zgmem"
+          export ZG_FAKE_LOG="$work/zg-calls.log"
+          sessions="$work/sessions/--Users-ci-demo--"
+          mkdir -p "$sessions" "$work/bin"
+
+          cat > "$work/bin/zg" <<'SH'
+          #!/bin/sh
+          echo "zg $*" >> "${ZG_FAKE_LOG:-/dev/null}"
+          mkdir -p "$PWD/.zvec-grep/index.zvec"
+          : > "$PWD/.zvec-grep/index.zvec/sentinel"
+          echo "indexed 1 files"
+          SH
+          chmod +x "$work/bin/zg"
+          export PATH="$work/bin:$PATH"
+
+          cat > "$sessions/session-ci.jsonl" <<'EOF'
+          {"type":"session","id":"session-ci","timestamp":"2026-01-01T00:00:00.000Z"}
+          {"type":"message","id":"m1","timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"user","content":[{"type":"text","text":"how do we index the corpus?"}]}}
+          {"type":"message","id":"m2","timestamp":"2026-01-01T00:00:02.000Z","message":{"role":"assistant","content":[{"type":"text","text":"we shard it per session."}]}}
+          {"type":"message","id":"m3","timestamp":"2026-01-01T00:00:03.000Z","message":{"role":"user","content":[{"type":"text","text":"and the tail shard?"}]}}
+          {"type":"message","id":"m4","timestamp":"2026-01-01T00:00:04.000Z","message":{"role":"assistant","content":[{"type":"text","text":"only the tail gets re-embedded."}]}}
+          EOF
+
+          ETL=extensions/zg-memory/jsonl2corpus.py
+          MEM=extensions/zg-memory/zgmem.py
+          CORPUS="$ZGMEM_DIR/ci-demo/corpus"
+
+          echo "=== 1. ETL 建语料(顺带建 manifest) ==="
+          python3 "$ETL" "$sessions/*.jsonl" "$CORPUS"
+
+          echo "=== 2. refresh: 无变化, 应 no-op ==="
+          python3 "$MEM" refresh --sessions-dir "$sessions" --workspace ci-demo
+
+          echo "=== 3. 追加一条后 refresh: 应走增量 ==="
+          echo '{"type":"message","id":"m5","timestamp":"2026-01-01T00:00:05.000Z","message":{"role":"user","content":[{"type":"text","text":"does the tail shard get re-embedded?"}]}}' >> "$sessions/session-ci.jsonl"
+          python3 "$MEM" refresh --sessions-dir "$sessions" --workspace ci-demo
+
+          echo "=== 4. sessions 应列出 session-ci ==="
+          python3 "$MEM" sessions --workspace ci-demo | tee "$work/sessions.txt"
+          grep -q session-ci "$work/sessions.txt"
+
+          echo "=== 5. 断言 ==="
+          shards=$(find "$ZGMEM_DIR" -name '*.txt' | wc -l | tr -d ' ')
+          echo "shards=$shards  zg 调用=$(wc -l < "$ZG_FAKE_LOG" | tr -d ' ')"
+          test "$shards" -ge 1
+          test -n "$(find "$ZGMEM_DIR" -name 'manifest.json')"
+          echo "pipeline OK"

@@ -1,5 +1,6 @@
 # pi-zg-mem
 
+[![CI](https://github.com/happyTonakai/pi-zg-mem/actions/workflows/ci.yml/badge.svg)](https://github.com/happyTonakai/pi-zg-mem/actions/workflows/ci.yml)
 [![License](https://img.shields.io/github/license/happyTonakai/pi-zg-mem)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey)](#install)
 [![Made for pi](https://img.shields.io/badge/made%20for-pi-8A2BE2)](https://pi.dev)
@@ -76,7 +77,7 @@ zg_memory_open   ──►  drill back into the JSONL (thinking / tool calls / s
 | [`pi`](https://pi.dev) | host agent | `pi --version` |
 | [`zvec-grep`](https://github.com/zvec-ai/zvec-grep) | the search engine (`zg`) | `npm i -g @zvec/zvec-grep && zg --version` |
 | `rg` (ripgrep) | literal-mode search | `rg --version` |
-| `python3` | the ETL + CLI | `python3 --version` |
+| `python3` | the ETL + CLI (3.9+) | `python3 --version` |
 
 ```bash
 pi install git:github.com/happyTonakai/pi-zg-mem
@@ -94,6 +95,8 @@ Then `/reload` (or restart pi). From a local clone, `pi install /absolute/path/t
 ```bash
 python3 extensions/zg-memory/tests/test_zgmem.py     # 25 offline tests, no network, no zg needed
 ```
+
+That suite is what [CI](.github/workflows/ci.yml) runs — Python 3.9 / 3.11 / 3.13, on both Ubuntu and macOS, with nothing installed beyond the stdlib. CI also drives the real entry points end-to-end (ETL → no-op refresh → incremental refresh) so the pipeline can't silently rot.
 
 ## Usage
 

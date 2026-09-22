@@ -1,5 +1,6 @@
 # pi-zg-mem
 
+[![CI](https://github.com/happyTonakai/pi-zg-mem/actions/workflows/ci.yml/badge.svg)](https://github.com/happyTonakai/pi-zg-mem/actions/workflows/ci.yml)
 [![License](https://img.shields.io/github/license/happyTonakai/pi-zg-mem)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey)](#安装)
 [![Made for pi](https://img.shields.io/badge/made%20for-pi-8A2BE2)](https://pi.dev)
@@ -76,7 +77,7 @@ zg_memory_open   ──►  回指 JSONL 深钻（thinking / 工具调用 / 上�
 | [`pi`](https://pi.dev) | 宿主 agent | `pi --version` |
 | [`zvec-grep`](https://github.com/zvec-ai/zvec-grep) | 搜索引擎（`zg`） | `npm i -g @zvec/zvec-grep && zg --version` |
 | `rg`（ripgrep） | 字面精确模式 | `rg --version` |
-| `python3` | ETL + CLI | `python3 --version` |
+| `python3` | ETL + CLI（3.9+） | `python3 --version` |
 
 ```bash
 pi install git:github.com/happyTonakai/pi-zg-mem
@@ -94,6 +95,8 @@ pi list          # 确认已注册
 ```bash
 python3 extensions/zg-memory/tests/test_zgmem.py     # 25 个离线用例，不联网、不需要 zg
 ```
+
+这套用例就是 [CI](.github/workflows/ci.yml) 跑的东西——Python 3.9 / 3.11 / 3.13，Ubuntu 与 macOS 双平台，除标准库外什么都没装。CI 另外还端到端跑一遍真实入口（ETL → 无变化 refresh → 增量 refresh），免得这条管线悄悄坏掉。
 
 ## 使用
 
