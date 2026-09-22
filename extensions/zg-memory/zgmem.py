@@ -53,6 +53,10 @@ _mpath = os.path.join(ZGMEM_HOME, SCOPE_DIR, "manifest.json")
 MANIFEST = zc.load_manifest(_mpath)
 EMBEDDING = os.environ.get("ZGMEM_EMBEDDING", "local/potion-multilingual-128m")
 EXT_DIR = os.path.dirname(os.path.abspath(__file__))
+# zg 索引是否已建成(与 index.ts 的 indexMarker 同口径); 随 workspace 切换, 故用函数取
+INDEX_MARKER_REL = os.path.join(".zvec-grep", "index.zvec")
+# 命中行精修(H2): zg 只报块首行, 块内真正命中行自己找; =0 关闭
+_REFINE_HITS = os.environ.get("ZGMEM_HIT_REFINE", "1") not in ("0", "false", "no")
 
 
 def list_workspaces():
@@ -136,6 +140,83 @@ def _prune_manifest(session_ids):
         zc.save_manifest(mpath, disk)
 
 
+def _index_marker() -> str:
+    return os.path.join(CORPUS_DIR, INDEX_MARKER_REL)
+
+
+def _index_stamp_path() -> str:
+    """“语料已成功索引”的状态戳(我们自己的目录, 不动 zg 的 .zvec-grep)"""
+    return os.path.join(ZGMEM_HOME, SCOPE_DIR, "index-stamp.json")
+
+
+def _corpus_fingerprint() -> dict:
+    """语料指纹(片段数/总字节/最新 mtime)
+
+    只看“语料变没变”。总字节数是可靠的那一项: 新增消息一定让它变大。
+    不能拿“语料 mtime > 索引 mtime”当陈旧判据 —— write_segment 把 mtime 钉在
+    首条消息的语义时间上(可能比索引时间早得多), 那样判会漏掉新追加的尾片。"""
+    files = _corpus_files()
+    newest, total = 0.0, 0
+    for p in files:
+        try:
+            st = os.stat(p)
+        except OSError:
+            continue
+        newest = max(newest, st.st_mtime)
+        total += st.st_size
+    return {"files": len(files), "bytes": total, "newest_mtime": int(newest * 1000)}
+
+
+def _index_stamp_ok() -> bool:
+    """语料是否与“上一次成功索引”时完全一致(没戳=上轮没成功过)"""
+    try:
+        with open(_index_stamp_path(), encoding="utf-8") as f:
+            stamp = json.load(f)
+    except (OSError, ValueError):
+        return False
+    return stamp == _corpus_fingerprint()
+
+
+def _mark_indexed(fp: dict = None):
+    """记下“成功索引过的语料状态”。fp 必须由调用方在 _run_index() **之前**取好
+
+    否则会把“索引期间别的实例写进来的语料”一并声明成已索引 -> 下一轮早退,
+    那些行就永久搜不到了(评审 MED-2)。"""
+    try:
+        p = _index_stamp_path()
+        tmp = p + f".{os.getpid()}.tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(_corpus_fingerprint() if fp is None else fp, f)
+        os.replace(tmp, p)
+    except OSError as e:
+        print("警告: 索引状态戳写入失败(下轮会白跑一次 zg index):", e)
+
+
+def _clear_index_stamp():
+    try:
+        os.unlink(_index_stamp_path())
+    except OSError:
+        pass
+
+
+def _corpus_files():
+    """语料目录里的分片文件(非隐藏)"""
+    return [p for p in glob.glob(os.path.join(CORPUS_DIR, "*.txt"))
+            if not os.path.basename(p).startswith(".")]
+
+
+def _run_index():
+    """跑 zg 增量索引 -> None=成功; "lease-active"=另一个 zg 进程在写本 root; 其它=错误文本"""
+    proc = subprocess.run(["zg", "index", ".", "--embedding", EMBEDDING], cwd=CORPUS_DIR,
+                          capture_output=True, text=True, timeout=300)
+    if proc.returncode == 0:
+        return None
+    out = ((proc.stderr or "") + (proc.stdout or "")).strip()
+    if "DAEMON_LEASE_ACTIVE" in out:
+        return "lease-active"
+    return out or f"zg index 退出码 {proc.returncode}"
+
+
 def cmd_refresh(args):
     """扫描 sessions 目录, 只重跑 mtime/size 变化的 jsonl(ETL 内部再前缀校验+增量续读), 然后 zg 增量索引"""
     import glob as _glob
@@ -146,13 +227,20 @@ def cmd_refresh(args):
     deleted = []
     now_m = {}
     sess_map = zc.sessions(MANIFEST)
+    skipped = []
     for p in sorted(_glob.glob(os.path.join(sessions_dir, "*.jsonl"))):
         sid = os.path.splitext(os.path.basename(p))[0]
-        st = os.stat(p)
+        try:
+            st = os.stat(p)
+        except OSError as e:                      # 断链/竞态删除: 不因它整轮崩掉
+            skipped.append(f"{os.path.basename(p)}: {e}")
+            continue
         now_m[sid] = (st.st_mtime, st.st_size)
         prev = sess_map.get(sid)
         if prev is None or int(st.st_mtime * 1000) != prev.get("jsonl_mtime") or st.st_size != prev.get("jsonl_size"):
             changed.append(p)
+    for s in skipped:
+        print(f"跳过无法 stat 的会话文件 {s}")
     # sessions 目录有效但为空: 拒绝清理, 防止误删全部语料
     if not now_m and sess_map:
         print(f"sessions 目录无 jsonl, 拒绝清理 {len(sess_map)} 条 manifest (安全起见不 prune)")
@@ -164,39 +252,70 @@ def cmd_refresh(args):
             for p in zc.corpus_files_of(CORPUS_DIR, sid):
                 try: os.unlink(p)
                 except OSError: pass
-    if not changed and not deleted:
-        print("无变化, 无需更新")
-        return
-    print(f"变更 {len(changed)} 个, 删除 {len(deleted)} 个")
+    if changed or deleted:
+        print(f"变更 {len(changed)} 个, 删除 {len(deleted)} 个")
     # prune 先落盘(在任何 early-return 之前, 避免"文件已删但键永留"); ETL 的 merge 在其后读到已 prune 的 manifest
     if deleted:
         _prune_manifest(deleted)
-    etl_fail = 0
+    # 硬杀残留的半成品片: 没有任何 session 变化时 ETL 根本不会被调用, 所以这里也扫一次(LOW-5)。
+    # 只拿一小段锁(ETL 子进程会抢同一把锁, 不能在持锁时起它)
+    with zc.ManifestLock(_mpath):
+        zc.sweep_stale_tmp(CORPUS_DIR)
+    etl_fail = []
     for p in changed:
         try:
             out = subprocess.run([sys.executable, os.path.join(EXT_DIR, "jsonl2corpus.py"), p, CORPUS_DIR],
                                  capture_output=True, text=True, timeout=300)
             if out.returncode != 0:
-                etl_fail += 1
+                etl_fail.append(p)
                 print(out.stderr or out.stdout)
         except Exception as e:
-            etl_fail += 1
+            etl_fail.append(p)
             print("ETL 失败", p, e)
-    if changed and etl_fail == len(changed) and not deleted:
-        print("全部 ETL 失败, 跳过索引")
+    # 无变化 + 索引在 + 上轮索引确实成功过: 真没事情做
+    # (索引不存在, 或上轮 zg index 失败/lease-active -> 绝不能早退, 否则新语料永远搜不到)
+    # zg 建出来的 .zvec-grep/index.zvec 是**目录**(与 index.ts 的 existsSync 同口径), 不能用 isfile
+    if not (changed or deleted) and os.path.exists(_index_marker()) and _index_stamp_ok():
+        print("无变化, 索引已是最新")
         return
-    # zg 增量索引(冻结分片 size+mtime 不变 -> 只重嵌开放尾片)
-    proc = subprocess.run(["zg", "index", ".", "--embedding", EMBEDDING], cwd=CORPUS_DIR,
-                          capture_output=True, text=True, timeout=300)
-    if proc.returncode != 0:
-        print("zg index 失败:", proc.stderr or proc.stdout)
+    if not os.path.exists(_index_marker()):
+        print("索引缺失, 重建索引")
+    elif not (changed or deleted):
+        print("上轮索引未成功(或语料已变), 补跑索引")
+    rc = 0
+    index_err = None
+    if not _corpus_files() and not os.path.exists(_index_marker()):
+        print("语料目录为空且索引未建过, 跳过索引")
+    else:
+        # zg 增量索引(冻结分片 size+mtime 不变 -> 只重嵌开放尾片)
+        # 语料被清空时也要跑: 让 zg 把已删文件的向量一起清掉(LOW-3)
+        # 戳必须在跑索引**之前**取: 它只能描述 zg index 启动时就已经存在的语料
+        fp_before = _corpus_fingerprint()
+        index_err = _run_index()
+        if index_err is None:
+            _mark_indexed(fp_before)
+            print(f"索引已更新 ({len(changed)} changed, {len(deleted)} deleted)")
+        elif index_err == "lease-active":
+            # 另一个窗口/仓库的 zg 正在写本 root: 不是错误, 但绝不能报"索引已更新"
+            # 清掉状态戳 -> 下一轮必然会重试(D2/评审 HIGH-1)
+            _clear_index_stamp()
+            print("另一个 zg 进程正在写本 workspace 的索引(lease active), 本次未更新索引; 下一轮会重试")
+        else:
+            _clear_index_stamp()
+            print("zg index 失败:", index_err)
+            rc = 3
     # 重载 manifest, 保证本进程内后续读取一致(prune 已在 ETL 前落盘)
     try:
         MANIFEST.clear()
         MANIFEST.update(zc.load_manifest(os.path.join(ZGMEM_HOME, SCOPE_DIR, "manifest.json")))
     except Exception as e:
         print("警告: manifest 重载失败, 保持内存态:", e)
-    print(f"索引已更新 ({len(changed)} changed, {len(deleted)} deleted)")
+    if etl_fail:
+        print(f"注意: {len(etl_fail)}/{len(changed)} 个 session ETL 失败, 这些会话本轮未入语料(修掉原因后重跑即可)")
+        if rc == 0:
+            rc = 2
+    if rc:
+        sys.exit(rc)
 
 
 def _looks_exact(q: str) -> str:
@@ -302,6 +421,20 @@ def _pair_from_jsonl(path, jl):
     return None
 
 
+def _refine_hit_line(cname: str, meta: dict, cstart: int, query: str, span: int = None) -> int:
+    """zg 命中 -> 真正的命中行(全局行号)
+
+    zg 给的行号是命中块的**首行**(实测块首行可以比真正命中的行早 16 行), 块内到底哪一行
+    被命中只能自己找: 同片内从块首行往后限窗, 取 query 词元覆盖分最高的一行;
+    纯向量命中(无词元覆盖)时退回块首行 —— 比乱指一行更诚实。
+    ZGMEM_HIT_REFINE=0 可关闭精修。"""
+    start = (meta.get("start_corpus_line") or 1) + int(cstart) - 1
+    if not _REFINE_HITS:
+        return start
+    rows = zc.read_segment(CORPUS_DIR, cname, meta.get("start_corpus_line") or 1)
+    return zc.pick_hit_row(rows, start, zc.query_terms(query), span=span)
+
+
 def cmd_query(args):
     # session id 会进 rg/zg 的 glob 模式, 先拒绝元字符(防模式放宽)
     if getattr(args, "session", None) and not re.fullmatch(r"[A-Za-z0-9._-]+", args.session):
@@ -354,27 +487,29 @@ def cmd_query(args):
                 return
             continue
 
-        # 解析 zg 输出: 每行像  "#1 matchedBy=fts+vector 2026-....txt:32", 保序去重
+        # 解析 zg 输出: 每行像  "#1 matchedBy=fts+vector 2026-....txt:32" 或 "...p0003.txt:73-94", 保序去重
         hits = []
         seen = set()
-        # 只解析 '#N matchedBy=... file.txt:line' 命中头行; 语料正文回显可能含 xxx.txt:123 字样
+        # 只解析 '#N matchedBy=... file.txt:line[-end]' 命中头行; 语料正文回显可能含 xxx.txt:123 字样
+        # zg 给了块内窗口时记下末尾: 精修就在这个窗口内找命中行, 不用再猜它的块大小(评审 LOW-2)
         for ln in proc.stdout.splitlines():
             s = ln.strip()
             if not s.startswith("#"):
                 continue
-            m = re.search(r"([0-9A-Za-z_.-]+\.txt):(\d+)", s)
+            m = re.search(r"([0-9A-Za-z_.-]+\.txt):(\d+)(?:-(\d+))?", s)
             if m and m.group(1) in zc.segments(MANIFEST):
-                key = (m.group(1), int(m.group(2)))
+                key = (m.group(1), int(m.group(2)), int(m.group(3)) if m.group(3) else None)
                 if key not in seen:
                     seen.add(key)
                     hits.append(key)
 
-        for order, (cname, cstart) in enumerate(hits):
+        for order, (cname, cstart, cend) in enumerate(hits):
             meta = zc.segments(MANIFEST).get(cname)
             if not isinstance(meta, dict):
                 continue
             sid = meta.get("session_id")
-            gline = (meta.get("start_corpus_line") or 1) + int(cstart) - 1
+            wspan = max(0, cend - cstart) if cend else None
+            gline = _refine_hit_line(cname, meta, cstart, args.query, span=wspan)
             pair = zc.pair_for_global(CORPUS_DIR, MANIFEST, sid, gline)
             if pair is None:
                 continue

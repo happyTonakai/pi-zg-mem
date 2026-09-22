@@ -28,12 +28,14 @@ import itertools
 import json
 import os
 import re
+import time
 
 MANIFEST_VERSION = 2
 MAX_SEG_ROWS = int(os.environ.get("ZGMEM_SEG_ROWS", "200"))
 MAX_SEG_BYTES = int(os.environ.get("ZGMEM_SEG_BYTES", str(64 * 1024)))
 
-_SEG_RE = re.compile(r"^(?P<sid>.+)\.p(?P<seq>\d{4})\.txt$")
+# seq 位数不设上界(4 位起, 超过 9999 片自然涨到 5 位): 长会话可以无限分片
+_SEG_RE = re.compile(r"^(?P<sid>.+)\.p(?P<seq>\d{4,})\.txt$")
 
 try:
     import fcntl
@@ -303,6 +305,52 @@ def pair_for_global(corpus_dir: str, man: dict, sid: str, target_global: int):
     return p
 
 
+# ---------- 命中行定位 ----------
+# zg 命中只给"命中块起始行"(file.txt:<块首行>), 块内真正被命中的那一行要自己找,
+# 否则 ref 会指到块首行: agent 深钻时看到的是别的消息(见评审 H2)。
+CJK_RE = re.compile(r"[\u3400-\u9fff]+")          # 含扩展 A 的汉字连续段
+WORD_RE = re.compile(r"[A-Za-z0-9_]{2,}")
+HIT_REFINE_SPAN = int(os.environ.get("ZGMEM_HIT_SPAN", "40"))
+
+
+def query_terms(q: str):
+    """query -> 打分词元: 英数 token(>=2 字符) + 中文 2-gram(无分词器时的近似)
+
+    返回按长度降序(仅影响遍历顺序); 打分用各词元自身长度加权, 长词辨识度更高。"""
+    terms = set(WORD_RE.findall((q or "").lower()))
+    for run in CJK_RE.findall(q or ""):
+        if len(run) <= 2:
+            terms.add(run)
+        else:
+            terms.update(run[i:i + 2] for i in range(len(run) - 1))
+    return sorted(terms, key=len, reverse=True)
+
+
+def row_score(text: str, terms) -> int:
+    """覆盖分: 命中的不同词元按其长度求和(长词权重高)"""
+    low = (text or "").lower()
+    return sum(len(t) for t in terms if t in low)
+
+
+def pick_hit_row(rows, start_global: int, terms, span: int = None):
+    """在 [start_global, start_global+span] 内取覆盖分最高的行(并列取最早)
+
+    没有任何词元覆盖(纯向量命中/词元跨行断开)时退回 start_global, 即 zg 给的块首行 ——
+    比乱指一行更诚实。rows 为 read_segment/session_rows_full 的 [(全局行号, jl, role, ts, text)]。
+    """
+    if not rows or not terms:
+        return start_global
+    span = HIT_REFINE_SPAN if span is None else span
+    best, best_score = start_global, 0
+    for r in rows:
+        if r[0] < start_global or r[0] > start_global + span:
+            continue
+        s = row_score(r[4], terms)
+        if s > best_score:
+            best, best_score = r[0], s
+    return best
+
+
 # ---------- 切分 ----------
 def split_point(rows):
     """rows=[(jl, role, ts, text)]: 不需要切分返回 None, 否则返回切点(1..len(rows))"""
@@ -362,9 +410,13 @@ def new_hasher():
 
 
 def seq_allocator(segs, tail_seq):
-    """分片 seq 分配: 尾片沿用原 seq(文件名稳定), 其后编号从 max(已有 seq, 尾片 seq)+1 递增"""
+    """分片 seq 分配: 尾片沿用原 seq(文件名稳定), 其后编号从 max(已有 seq, 尾片 seq)+1 **无上界**递增
+
+    历史上这里写死 256 个号(chain[.., range(+1, +1+256)]): 单会话超过 257 片时
+    next() 抛 StopIteration, 半程已写的分片留下、会话入不了 manifest。分片号是生成器,
+    itertools.count 不会耗尽 -> 长会话任意片数都能写。"""
     max_seq = max([s.get("seq") or 0 for s in segs] or [0])
-    return itertools.chain([tail_seq], range(max(max_seq, tail_seq) + 1, max(max_seq, tail_seq) + 1 + 256))
+    return itertools.chain([tail_seq], itertools.count(max(max_seq, tail_seq) + 1))
 
 
 def corpus_files_of(corpus_dir: str, sid: str):
@@ -382,3 +434,31 @@ def corpus_files_of(corpus_dir: str, sid: str):
 
 def glob_escape(s: str) -> str:
     return re.sub(r"([*?\[\]])", r"[\1]", s or "")
+
+
+STALE_TMP_AGE = 3600          # 超过 1 小时的半成品视为硬杀/断电残留(评审 LOW-5)
+
+
+def sweep_stale_tmp(corpus_dir: str, max_age: int = STALE_TMP_AGE):
+    """清掉硬杀/断电留在语料目录里的半成品片(.staging / .<pid>.tmp)
+
+    只碰"隐藏 + 我们自己的后缀", 并且只删 mtime 超过 max_age 的, 免得误删另一个进程
+    此刻正在写的 tmp。调用方应已持有 manifest 锁。返回被删的文件名列表。
+    """
+    now = time.time()
+    removed = []
+    for p in sorted(glob.glob(os.path.join(corpus_dir, ".*"))):
+        b = os.path.basename(p)
+        if b in (".", "..") or not (b.endswith(".staging") or b.endswith(".tmp")):
+            continue
+        try:
+            if now - os.stat(p).st_mtime < max_age:
+                continue          # 可能是别的进程正在写的半成品: 不动
+            os.unlink(p)
+            removed.append(b)
+        except OSError:
+            pass
+    if removed:
+        head = ", ".join(removed[:5]) + (" ..." if len(removed) > 5 else "")
+        print(f"  清理残留半成品 {len(removed)} 个: {head}")
+    return removed

@@ -140,7 +140,13 @@ function buildFullIndex(sessionsDir: string, corpusDir: string): Promise<string>
   return enqueue(async () => {
     if (epoch !== _epoch) throw new Error("session 已切换, 排队中的全量构建作废");
     if (!hasSessionFiles(sessionsDir)) return `skip: no jsonl in ${sessionsDir}`;
-    await runPy(PY_ETL, [path.join(sessionsDir, "*.jsonl"), corpusDir]);
+    try {
+      await runPy(PY_ETL, [path.join(sessionsDir, "*.jsonl"), corpusDir]);
+    } catch (e: any) {
+      // ETL 里某个 session 挂了(exit 2): 仍然建索引 —— 别让一个坏会话废掉整库查询,
+      // 但必须吵出来(以前 ETL 吞异常 + exit 0, 表面一切正常)
+      console.error("[zg-memory] ETL 有失败(仍继续建索引):", e?.message || e);
+    }
     await zgIndex(corpusDir, true);
     return `indexed all sessions in ${sessionsDir}`;
   });
@@ -327,7 +333,8 @@ export default function (pi: ExtensionAPI) {
           ctx.ui.notify(`未知子命令: ${arg}`, "error");
         }
       } catch (e: any) {
-        ctx.ui.notify("失败: " + (e?.message || String(e)), "error");
+        const detail = (e?.stdout || e?.stderr || "").toString().trim();   // 失败细节(如 ETL 的 traceback)别丢
+        ctx.ui.notify("失败: " + (e?.message || String(e)) + (detail ? "\n" + detail.slice(-1500) : ""), "error");
       }
     },
   });
