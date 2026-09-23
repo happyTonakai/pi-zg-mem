@@ -270,6 +270,7 @@ export function runIndex(corpusDir: string, embedding: string): string | null {
     cwd: corpusDir,
     encoding: "utf8",
     timeout: 300_000, // py: timeout=300
+    maxBuffer: zc.subprocessMaxBuffer(), // 默认才 1 MiB，zg index 的输出会超
   });
   // py 对 FileNotFoundError / TimeoutExpired 都不捕获（_run_index 里没有 try）→ 直接崩。
   // 这里同样不吞，交给模块 E 按"意外异常"渲染。

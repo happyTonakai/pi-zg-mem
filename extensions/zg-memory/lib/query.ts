@@ -460,7 +460,13 @@ export function rgCandidates(
   // -H: 单文件 target 也打文件名(否则解析全挂); -e: query 以 '-' 开头时与 rg 选项隔离
   const args = ["-n", "-F", "--no-heading", "-H", "-e", opts.query];
   if (opts.session) args.push("--glob", `${path.basename(opts.session)}.jsonl`);
-  const proc = childProcess.spawnSync("rg", [...args, ...targets], { encoding: "utf8" });
+  const proc = childProcess.spawnSync("rg", [...args, ...targets], {
+    encoding: "utf8",
+    maxBuffer: zc.subprocessMaxBuffer(),
+  });
+  // 为什么不先 return []：rg 输出超限时 spawnSync 给的是 error=…MAXBUFFER + status=null，
+  // 当成“没命中”就变成了静默错答案（真机全量 rg 早就过 1 MiB 了）。
+  if (proc.error) throw proc.error;
   if ((proc.status ?? -1) !== 0) return [];
 
   const j2s = new Map<string, string>();
@@ -644,7 +650,11 @@ export function runQuery(opts: QueryOpts, env: QueryEnv = queryEnv()): RunResult
       cmd.push("--modified-after", String(Date.now() - since * 86400 * 1000));
     }
 
-    const proc = childProcess.spawnSync(cmd[0], cmd.slice(1), { cwd: scope.corpusDir, encoding: "utf8" });
+    const proc = childProcess.spawnSync(cmd[0], cmd.slice(1), {
+      cwd: scope.corpusDir,
+      encoding: "utf8",
+      maxBuffer: zc.subprocessMaxBuffer(),
+    });
     if (proc.error) throw proc.error; // py: 找不到 zg -> FileNotFoundError 直接崩(不吞)
     if ((proc.status ?? -1) !== 0) {
       const err = pyOr(pyTruthy(proc.stderr) ? proc.stderr : null, proc.stdout);

@@ -39,7 +39,7 @@
 | C | `lib/query.ts` | `zgmem.py`（查询侧） | ~ | 只读路径：query/show/ctx/sessions + 命中精修 |
 | D | `lib/refresh.ts` | `zgmem.py`（刷新侧） | ~ | 写入路径：ETL + zg index + 索引戳/重试 |
 | E | `lib/cli.ts` | `zgmem.py`（入口） | ~ | 独立 CLI：`node lib/cli.ts <cmd>`，保留现有命令行 UX |
-| F | `index.ts` | 改造 | 365 | 改为**进程内**导入 lib，去掉 `python3` 子进程 |
+| F | `index.ts` | 改造 | 365 | 子进程执行体 `python3 <script>` → `node lib/*.ts`（**不是**进程内导入，理由见模块 F 小节） |
 | G | 清理 | — | — | 删 Python、改 CI、改 README/docs |
 
 ## 绞杀者式上线
@@ -144,7 +144,7 @@ L1 只能靠"文件年龄 > 租约"判定它是残留 —— 于是「刚跑完 
 - [x] Python 用例对等：`TestH1SeqAllocator`(2/3)、`TestH2HitRefinement`(3/4) 已按原名迁移；
       当时剩余 3 条依赖模块 B/C（`test_long_session_gets_all_fragments_into_manifest`、
       `test_refine_hit_line_end_to_end`、`TestIdempotent`）—— 其中前两条与 `TestIdempotent`
-      已在模块 B 落地时补齐，`test_refine_hit_line_end_to_end` 仍待模块 C
+      已在模块 B 落地时补齐，`test_refine_hit_line_end_to_end` 仍待模块 C（**已补**，见模块 C 小节）
 - [x] 产物逐字节一致：`tests/fixtures/` 黄金样本（分片 + manifest，覆盖 CJK/制表符/emoji/
       含换行文本/5 位 seq/带点 sid/非 ASCII sid）
 - [x] 真实语料差分：**7 workspace / 241 分片 / 8267 行，与 Python 零差异**
@@ -189,6 +189,7 @@ CI：新增 `ts-tests` job（**node 22 + 24 × ubuntu + macOS**，零依赖、�
       `test_long_session_gets_all_fragments_into_manifest`、`test_frozen_prefix_is_stable_and_later_runs_stay_incremental`
       （原名 `TestIdempotent`）。`test_refine_hit_line_end_to_end` **仍未迁移**（属模块 C 的 CLI 精修
       路径，现只有 `pickHitRow` 单测），待 C 落地时补 —— 已登记在下方“未迁移用例”清单里。
+      > 后续：该条已在模块 C 迁入 `tests/query.test.ts`，本段保留 B 落地当日的状态描述。
 - [x] 产物逐字节一致：`tests/fixtures/etl/`（7 个会话 / 9 个分片 + manifest）。
       manifest 用 `ensure_ascii=False + indent=2`（与 Python `save_manifest` 同参），
       测试里把临时会话目录换成 `__SESSIONS_DIR__` 占位符后整文件字节比对；分片直接字节比对
@@ -230,6 +231,113 @@ manifest 的 `segments` 是普通对象，键的插入顺序在“重建”与�
 5. `fnmatch` 的 `[^…]`：Python `translate` 对首字符 `^` 做转义（匹配字面 `^`），TS 原先当取反类。
 6. `scan` 的超长单行拼接由单缓冲区改为块列表（原写法每读一块就整体重拷，单行 L 字节耗 `O(L²/CHUNK)`）。
 
+### 模块 C `lib/query.ts` — 完成（提交 `c12183c`）
+
+只读路径（query / show / ctx / sessions）的移植，`lib/query.ts` 840 行，导出
+`runQuery(opts, env)`、`runShow`、`runCtx`、`runSessions`、`loadScope`、`pickHitRow`、`pairFromJsonl`。
+
+验收对照：
+
+- [x] 差分对拍：`tests/differential/query_differential.ts` **116 项全绿**（合成语料 + 真实语料），
+      比 stdout、退出码与 zg/rg 的 argv
+- [x] pytest 用例对等：`TestH2HitRefinement.test_refine_hit_line_end_to_end` 已按原名迁入 `tests/query.test.ts`
+- [x] 常驻回归：`tests/query.test.ts` 20 条（迁移用例 + 变异测试固化的断言），**不依赖 Python**
+
+变异测试（`tests/differential/mutate_query.sh`）固化成常驻断言的点：rg 的 since 单位
+（`now_ms - since*86400*1000`）、who 过滤 / `--session` glob / `pairFromJsonl` 兜底、跨 workspace 去重键必须含
+session、show 截断 800 / ctx 截断 200 + 换行→空格、`limit = pool>top ? pool : top`、非法 session id。
+
+### 模块 D `lib/refresh.ts` — 完成（提交 `c0f13f0`）
+
+写入路径（ETL + `zg index` + 索引戳/重试），`lib/refresh.ts` 456 行，导出 `runRefresh(scope, opts, deps)`
+与 `indexMarker`。
+
+验收对照：
+
+- [x] 差分对拍：`tests/differential/refresh_differential.ts` **759 项全绿**
+- [x] Python 用例对等：`TestM2IndexRefresh.*` 9 条（`test_zgmem.py:332-598`）已按原名迁入 `tests/refresh.test.ts`
+- [x] 常驻回归：`tests/refresh.test.ts` 9 条，守 M2 的三条历史 bug（无变化早退跳过修索引、
+      `lease active` 谎报已更新、索引运行期间语料被改仍记成已索引）
+
+与 Python 侧的逐条差异（进程内 `runRefresh` 代替起子进程断言 returncode、monkeypatch
+`MAX_SEG_ROWS`→`ProcessOptions.limits`、ENOSPC 用目录冒充文件等）记在 `tests/refresh.test.ts` 文件头。
+
+### 模块 E `lib/cli.ts` — 完成（提交 `666c8f2`）
+
+argparse 兼容的 CLI 前端，`lib/cli.ts` 545 行，入口 `if (import.meta.main) process.exitCode = main(process.argv.slice(2))`。
+
+验收对照：
+
+- [x] 差分对拍：`tests/differential/cli_differential.ts` **148 项全绿** —— 比 stdout 字节 + stderr 字节 +
+      退出码（`-h`/usage 的换行与缩进、`--who bogus` 之类的报错文本、`show --workspace all` 的拒绝路径都在内）。
+      这一层是 25 个 Python 用例盖不到的（它们只覆盖库函数，cli.ts 是用户直接看的一层）
+- [x] 模块 F 落地时在原命令上复跑一遍（`SKIP_REAL=1`）：**148 项全部一致**
+
+对拍顺带得到一个结论：lease 锁唯一可观测地劣于 flock 的场景是「Python 释放后留下空锁文件」，
+而 Python 在模块 G 整体删除 —— 已记入「已知语义差异」第 1 条。
+
+### 模块 F `index.ts` — 完成
+
+**决定（与原计划不同）：不是“进程内导入 lib”，而是保留子进程、只把执行体从 `python3` 换成 `node`。**
+
+原计划写的「改为进程内导入」有两个问题，实测后改选：
+
+1. **lib 是同步实现**（15 处 `spawnSync`，忠于 Python 的 `subprocess.run`）。进程内直调会占住 pi 的
+   event loop → TUI 冻结。
+2. 即便不看同步：刷新的触发点是 `agent_settled`，**每轮会话结束都会跑**，而真实语料（83MB / 250 分片）上
+   冷 `zg index` 实测 **5.7s**（无变化 0.5s；hybrid 查询 1.1s；rg 查询 0.08s）。
+
+保留子进程的收益：不占 event loop、崩溃隔离、`session_shutdown` 能中止（`liveAbort()`）。
+改动本身只有几行，且两个入口的等价性已由差分对拍证明（`node lib/cli.ts` ≡ `python3 zgmem.py`、
+`node lib/etl.ts` ≡ `python3 jsonl2corpus.py`）。备选方案记录在案：**F1** worker_threads（真进程内、
+可 terminate，代价是 worker 引导 + 每次一个线程 + 失去崩溃隔离）、**F3** 把 lib 的 `spawnSync` 改 async
+（长期最干净，但要重写 C/D 已验收代码）—— 两者都留作按需优化，不阻塞迁移。
+
+改动清单：
+
+- 常量：`PY_MEM`/`PY_ETL` → `LIB_CLI`/`LIB_ETL`（`lib/cli.ts` / `lib/etl.ts`）
+- `runPy` → `runLib`：`execFileAsync(process.execPath, ["--experimental-strip-types", script, ...args], ...)`
+  （`--experimental-strip-types`：node 22.6+ 要靠它直接跑 `.ts`，24 起默认开启但接受该 flag，
+  显式带上让两个版本行为一致 —— 与 `ci.yml` 的口径相同）
+- 7 个调用点全部换到 `runLib(LIB_*, ...)`：`buildFullIndex` 的 ETL、`scheduleRefresh` 的 refresh、
+  工具 query / show / ctx、`/zgmem refresh`、`/zgmem sessions`
+- 注释里“python 会把错误文本打到 stdout”改为“底层(CLI/zg)”，会话关闭钩子注释的 python → lib
+
+验收对照：
+
+- [x] `tsc --noEmit` 0 错误；TS 套件 **67 用例全绿**（F 前 61 + 新增 6；真机修复后又 +1 → 68，见下一小节）
+- [x] `index.ts` 里不再有 `python3` / `*.py` 的**字符串字面量**执行目标（注释里保留历史叙述）
+- [x] 新增常驻回归 `tests/runtime_boundary.test.ts`（6 条，**不依赖 Python，永久保留**）：
+      ① 静态边界（无 python3/*.py 字面量、spawn 必须是 `process.execPath` + flag、`LIB_*` 目标存在且真被调用）；
+      ② 真进程冒烟（`cli.ts -h` rc 0 且 usage 在 stdout；`etl.ts` 裸跑走用法分支 rc 2）；
+      ③ 端到端 —— 用**与 `index.ts` 逐字相同**的 argv 形状驱动真实入口，全部走子进程：
+      ETL → refresh(建) → refresh(无变化, no-op，断言 zg **没被再调**) → refresh(增量，断言 zg 正好再跑一次)
+      → sessions → query(--mode rg --json) → show / ctx（假 zg 挂 PATH）
+- [x] 模块 E 的 CLI 差分在原命令上复跑：148 项一致
+
+**有意不覆盖**（维护本项时的取舍）：`index.ts` 的 pi 事件接线（`session_start` / `agent_settled` /
+`enqueue` / `_epoch`）与工具 schema —— 要假一整套 pi runtime，成本大于收益，见「明确不做的项」L1。
+F 之后 `index.ts` 与 lib 之间只剩 argv 送达这一件事，已由上面第 ③ 条钉住。
+
+**验收后补的真机修复（Node `maxBuffer`，2026-09-23）**：真机上 `--mode rg` 在大 workspace（35 个 JSONL，
+267 处命中）下**恒返回空**。原因是 `spawnSync` 默认 `maxBuffer` 只有 1 MiB，超限时它给的是
+`error: spawnSync rg ENOBUFS` + `status=null`，而 rg 分支原来只看 `status !== 0 → return []` ——
+于是“输出太大”被当成“没有命中”，**静默给出错答案**（Python 的 `subprocess.run` 没有这个上限，
+所以差分对拍的 fixture 太小，一直没照出来）。修法：`lib/corpus.ts:subprocessMaxBuffer()` 把上限提到
+256 MiB（`ZGMEM_SUBPROCESS_MAX_BUFFER` 可覆盖、每次调用都重读），三处 `spawnSync`
+（`lib/query.ts` 的 rg / zg、`lib/refresh.ts` 的 zg）都用它，且 rg 分支改为**显式抛** `proc.error`。
+回归：`tests/query.test.ts` 新增 `rgCandidates.raises_on_maxbuffer_instead_of_silently_returning_nothing`
+（把上限压到 1 字节，钉住“必须抛、不许返回 []”）。
+
+**同时确认（不是差异，不修）**：rg 模式下 `--top N` 的**名次本来就不稳定** —— rg 多线程跨 35 个文件时
+输出顺序随机（同一 argv 连跑 4 次得到 4 种顺序），Python 与 TS 都如此（各连跑 6 次，各出现 3 种 top3 组合）。
+所以模块 E 的差分脚本对 rg 各例用“序无关比较（rank 抹平）”是必要的，rg 模式的逐字节对拍只能在
+单文件 fixture 上做。
+
+**模块 G 的欠账**（F 不改，留给 G）：删 3 个 `.py`（`zgmem.py`/`jsonl2corpus.py`/`zgmem_corpus.py`）、
+删 `extensions/zg-memory/tests/test_zgmem.py`、删 5 个差分脚本、CI 的 py job 与 pipeline job、
+README 里 `python3` 的残留（含「需要 `python3` 在 PATH 上」这条前置条件）。
+
 ### 已知残余差异（已记录，**不修**）
 
 - **非标准 JSON 字面量 `NaN` / `Infinity` / `-Infinity`**：Python `json.loads` 默认接受这三个字面量，
@@ -247,13 +355,16 @@ manifest 的 `segments` 是普通对象，键的插入顺序在“重建”与�
 - [x] `TestH1SeqAllocator.*` / `TestH2HitRefinement.*` → `tests/corpus.test.ts`
 - [x] `TestH1EtlFailureIsVisible` / `TestH3MigrateCleanup` / `TestM1TailConsistency` / `TestIdempotent`
       → `tests/etl.test.ts`
-- [ ] `TestH2HitRefinement.test_refine_hit_line_end_to_end` —— 依赖尚未迁移的 CLI 精修路径（模块 C）
-- [ ] `TestM2IndexRefresh.*`（9 条，`test_zgmem.py:332-598`）—— 测尚未迁移的 `zgmem.py`（模块 C/D）
+- [x] `TestH2HitRefinement.test_refine_hit_line_end_to_end` —— 已迁入 `tests/query.test.ts`（模块 C，超出原名用例）
+- [x] `TestM2IndexRefresh.*`（9 条，`test_zgmem.py:332-598`）—— 已按原名迁入 `tests/refresh.test.ts`（模块 D）
+
+**结论：`test_zgmem.py` 的 25 条已全部迁完**；该文件与 5 个差分脚本一起留给模块 G 删除。
 
 ### 测试/CI 缺口（三轮 reviewer 记录）
 
-- [x] **测试发现兜底 + 入口覆盖**：CI 用 `--test-reporter=tap` 断言 `# pass ≥ 28`（node22 默认 TAP、
-      node24 默认 spec，不锁 reporter 会在 22 上失效）；`find **/*.ts` 递归 `--check` 覆盖入口 `index.ts`，
+- [x] **测试发现兜底 + 入口覆盖**：CI 用 `--test-reporter=tap` 断言 `# pass ≥ 60`（当前 67：A 16 + A 黄金 3 + B 13 +
+      C 20 + D 9 + F 6；node22 默认 TAP、node24 默认 spec，不锁 reporter 会在 22 上失效）；
+      `find **/*.ts` 递归 `--check` 覆盖入口 `index.ts`，
       `import()` 仅对零依赖的 `lib/*.ts`（`index.ts` 依赖 peerDependency `typebox`，CI 无 `npm ci`）。
 - [x] **静态类型检查**：新增 `typecheck` CI job（独立 node22 job，不随 OS/node 矩阵翻倍）+
       `tsconfig.json`（`strict`/`noEmit`/`allowImportingTsExtensions`）。CI 只装两个 devDependency
@@ -264,8 +375,11 @@ manifest 的 `segments` 是普通对象，键的插入顺序在“重建”与�
 - [x] **黄金样本盲区**：补了 mtime 变而内容不变仍 `(+0 inc)`（`tests/etl.test.ts`，`canContinue` 只比 `prefix_sha`）、
       非 ASCII sid 端到端（ETL 写分片名 + manifest 键 + `ensure_ascii=False`）、user/assistant 配对跨分片边界
       （`tests/corpus.test.ts`，`readWindow` 的 needPrev/needNext 扩片）。
-- `tests/differential/etl_differential.ts` 是迁移期一次性证据，**故意不进 CI**（需要 Python 当裁判）；
-  已随模块 B 提交进仓库（`23370f6`），待模块 G 删 Python 时一并删除。
+- `tests/differential/*.ts`（corpus / etl / query / refresh / cli，共 5 个）是迁移期一次性证据，**故意不进 CI**
+  （需要 Python 当裁判）；随模块 B–E 提交进仓库，待模块 G 删 Python 时一并删除。
+  **F 起运行时已与 Python 无关**：端到端链路改由 `tests/runtime_boundary.test.ts` 常驻守着（不需要 Python）。
+- **`python3` 已退出运行时，但仍在 CI 里当裁判**：`tests` job（25 个 py 用例）与 `pipeline` job
+  （ETL → refresh 全链路）都是 Python 侧证据，模块 G 与 `.py` 一起删。
 
 > **黄金样本盲区（未修，已知）**：`tests/etl.test.ts` 的黄金样本只对「Python 序列化出来的 manifest 文件」
 > 换成 `__SESSIONS_DIR__` 占位符后整字节比对，因此**只在 Python 写过那些键上生效**：若 TS 侧多写一个

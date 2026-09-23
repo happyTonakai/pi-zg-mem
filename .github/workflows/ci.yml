@@ -59,7 +59,8 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
 
-      # TS 侧回归：单元用例 + 黄金样本逐字节比对。零运行时依赖，不需要 npm ci。
+      # TS 侧回归：单元用例 + 黄金样本逐字节比对 + **模块 F 的运行时边界**
+      # （tests/runtime_boundary.test.ts 会起真子进程跑 node lib/*.ts，假 zg 挂 PATH）。零运行时依赖，不需要 npm ci。
       # 也不需要 Python —— 黄金样本已由 tests/fixtures/generate_corpus_fixtures.py 生成并提交，
       # 所以 CI 不再把 Python 当裁判（见 docs/plan-ts-migration.md 回归策略第 1 层）。
       # 注意：tests/differential/ 是迁移期的一次性证据（需要 Python），故意不在这里跑。
@@ -68,10 +69,10 @@ jobs:
           set -o pipefail
           node --experimental-strip-types --test --test-reporter=tap | tee /tmp/ts-test.tap
           # 发现即失败：用例文件被改名/移走时 node 会以 0 用例 exit 0，必须显式兜底。
-          # 当前 32 个；低于 28 直接红。（--test-reporter=tap 是必须的：node22 默认 TAP、
+          # 当前 67 个；低于 60 直接红。（--test-reporter=tap 是必须的：node22 默认 TAP、
           # node24 默认 spec，不锁 reporter 这个 grep 会在 22 上失效）
           pass=$(grep -E '^# pass [0-9]+' /tmp/ts-test.tap | tail -1 | awk '{print $3}')
-          test "${pass:-0}" -ge 28
+          test "${pass:-0}" -ge 60
 
       # 把迁移计划里的两条硬约束变成 CI 断言，而不是靠人记得：
       #   1. 只用可擦除语法 —— 每个模块都要能被 node 直接解析执行（无 enum/namespace/装饰器）
@@ -86,7 +87,7 @@ jobs:
           # bash 3.2 下也能原样复现这条检查（Runner 上是 bash 5，无影响）。
           files=()
           while IFS= read -r f; do files+=("$f"); done < <(find extensions/zg-memory -name '*.ts' -not -path '*/node_modules/*' | sort)
-          test "${#files[@]}" -ge 3   # corpus.ts + etl.ts + index.ts
+          test "${#files[@]}" -ge 5   # corpus.ts + etl.ts + query.ts + refresh.ts + cli.ts + index.ts
           for f in "${files[@]}"; do
             echo "-> $f"
             # --check 只解析语法、不解析 import，对 peerDependency 入口也安全
@@ -168,6 +169,10 @@ jobs:
       # 端到端跑用户真正会碰到的入口: 建语料 → 无变化 refresh(应 no-op) →
       # 追加一条后 refresh(应走增量, 只有尾片重嵌) → 列出会话。
       # 故意不需要 zg: 用一个只认 `zg index . --embedding X` 的假二进制顶上。
+      #
+      # 这是 **Python 侧**的证据（模块 G 与 .py 一起删）。同一件事在 TS 运行时上由
+      # tests/runtime_boundary.test.ts 常驻守着（走 node lib/*.ts，不需要 Python），
+      # 所以这里删掉时覆盖不会掉。
       - name: ETL bootstrap → no-op refresh → incremental refresh
         run: |
           set -euo pipefail

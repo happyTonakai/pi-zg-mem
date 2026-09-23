@@ -49,7 +49,7 @@ The point is that the second step is **lossless**. `zg` is only the discovery la
 ```
 ~/.pi/agent/sessions/**/*.jsonl     raw sessions (complete: timestamps / roles / thinking / tool calls)
         │
-        │  jsonl2corpus.py     clean: keep user+assistant text, drop the noise
+        │  lib/etl.ts           clean: keep user+assistant text, drop the noise
         ▼
 ~/.pi/agent/zgmem/<workspace>/corpus/     clean corpus, sharded per session
         │        <session>.p0001.txt, p0002, … + one unfrozen tail shard
@@ -77,7 +77,6 @@ zg_memory_open   ──►  drill back into the JSONL (thinking / tool calls / s
 | [`pi`](https://pi.dev) | host agent | `pi --version` |
 | [`zvec-grep`](https://github.com/zvec-ai/zvec-grep) | the search engine (`zg`) | `npm i -g @zvec/zvec-grep && zg --version` |
 | `rg` (ripgrep) | literal-mode search | `rg --version` |
-| `python3` | the ETL + CLI (3.9+) | `python3 --version` |
 
 ```bash
 pi install git:github.com/happyTonakai/pi-zg-mem
@@ -93,11 +92,11 @@ Then `/reload` (or restart pi). From a local clone, `pi install /absolute/path/t
 **Verify it works**
 
 ```bash
-python3 extensions/zg-memory/tests/test_zgmem.py     # 25 offline Python tests, no network, no zg needed
-node --experimental-strip-types --test                # 32 TypeScript tests, same constraints
+node --experimental-strip-types --test                # 68 TypeScript tests: no network, no zg, no Python
+python3 extensions/zg-memory/tests/test_zgmem.py     # 25 Python tests kept as the migration oracle (module G deletes them)
 ```
 
-[CI](.github/workflows/ci.yml) runs the Python suite on Python 3.9 / 3.11 / 3.13 across Ubuntu and macOS, the TypeScript suite on Node 22 / 24 across both, a `tsc --noEmit` typecheck, and a pipeline job that drives the real entry points end-to-end (ETL → no-op refresh → incremental refresh) so nothing can silently rot.
+[CI](.github/workflows/ci.yml) runs the TypeScript suite on Node 22 / 24 across Ubuntu and macOS, a `tsc --noEmit` typecheck, the Python suite (3.9 / 3.11 / 3.13) plus a pipeline job that drives the Python entry points end-to-end (ETL → no-op refresh → incremental refresh) — the Python jobs are the migration oracle and go away with the `.py` files. The same end-to-end path on the TypeScript runtime is covered permanently by `tests/runtime_boundary.test.ts`, which starts real `node lib/*.ts` subprocesses.
 
 ## Usage
 
@@ -132,19 +131,24 @@ node --experimental-strip-types --test                # 32 TypeScript tests, sam
 The CLI works without pi. From a clone:
 
 ```bash
-Z=./extensions/zg-memory/zgmem.py     # or ~/.pi/agent/git/github.com/happyTonakai/pi-zg-mem/extensions/zg-memory/zgmem.py when installed via pi
+# --experimental-strip-types: only needed on node 22 (24+ strips types by default)
+Z=./extensions/zg-memory/lib/cli.ts   # or ~/.pi/agent/git/github.com/happyTonakai/pi-zg-mem/extensions/zg-memory/lib/cli.ts when installed via pi
+alias zgc="node --experimental-strip-types $Z"
 
-python3 $Z query "codegraph vs zvec-grep" --top 3
-python3 $Z query "that error code from last week" --mode rg
-python3 $Z query "what did we say last week" --since 7
-python3 $Z query "..." --workspace all           # across every workspace
-python3 $Z query "..." --json                    # structured output, with ref + ts
+zgc query "codegraph vs zvec-grep" --top 3
+zgc query "that error code from last week" --mode rg
+zgc query "what did we say last week" --since 7
+zgc query "..." --workspace all           # across every workspace
+zgc query "..." --json                    # structured output, with ref + ts
 
-python3 $Z show <session> <corpus_line> --full    # one raw record
-python3 $Z ctx  <session> <corpus_line> --span 5  # surrounding conversation
-python3 $Z sessions                               # list indexed sessions
-python3 $Z refresh --sessions-dir <dir>           # incrementally refresh
+zgc show <session> <corpus_line> --full    # one raw record
+zgc ctx  <session> <corpus_line> --span 5  # surrounding conversation
+zgc sessions                               # list indexed sessions
+zgc refresh --sessions-dir <dir>           # incrementally refresh
 ```
+
+> The Python front end (`zgmem.py`) took the same arguments and still does, but it is no longer the
+> runtime: `python3 zgmem.py <argv>` ≡ `node lib/cli.ts <argv>` byte-for-byte (module E differential).
 
 Inside pi, `/zgmem refresh`, `/zgmem reindex` and `/zgmem sessions` do the same.
 
@@ -195,19 +199,19 @@ This indexes **all of your session history** — including thinking blocks and t
 
 ## Status, limits, roadmap
 
-**Working and tested:** the ETL, hybrid + exact recall, drill-down, incremental maintenance, the extension surface. 25 offline Python tests (`python3 extensions/zg-memory/tests/test_zgmem.py`) plus 32 TypeScript tests, and a real-`zg` end-to-end smoke test. The Python design went through independent review ([`docs/reviews/`](docs/reviews/)), and the TypeScript migration added three reviewer rounds on top; both sets of findings and fixes are recorded, the latter in [`docs/plan-ts-migration.md`](docs/plan-ts-migration.md).
+**Working and tested:** the ETL, hybrid + exact recall, drill-down, incremental maintenance, the extension surface. 68 TypeScript tests (`node --experimental-strip-types --test`), plus the 25 Python tests kept as the migration oracle, and a real-`zg` end-to-end smoke test. The Python design went through independent review ([`docs/reviews/`](docs/reviews/)), and the TypeScript migration added three reviewer rounds on top; both sets of findings and fixes are recorded, the latter in [`docs/plan-ts-migration.md`](docs/plan-ts-migration.md).
 
-**Migration in progress.** The runtime is moving from Python to TypeScript, one module at a time, each step with byte-for-byte differential evidence against the Python implementation. The corpus and ETL layers are already ported (`extensions/zg-memory/lib/`); the recall layer is still Python, so **the extension still shells out to `python3` today** and `python3` remains a hard requirement until that lands. Plan, per-module evidence and the list of not-yet-migrated test cases: [`docs/plan-ts-migration.md`](docs/plan-ts-migration.md).
+**Migration in progress.** The runtime was moved from Python to TypeScript one module at a time, each step with byte-for-byte differential evidence against the Python implementation. As of module F the **runtime no longer shells out to `python3`** — the extension starts `node lib/*.ts` subprocesses (`lib/cli.ts` / `lib/etl.ts`); `python3` is now only needed for the migration-era differential harnesses (`tests/differential/`, deleted in module G together with the `.py` files). Plan, per-module evidence and the list of not-yet-migrated test cases: [`docs/plan-ts-migration.md`](docs/plan-ts-migration.md).
 
 **Known limits**
 
 - **Recall only.** Passive capture / automatic summarization into durable notes is not in this version — it's the deliberate next step.
 - **Per-turn refresh cost has a ~4 s floor** (fixed `zg` model load), even when re-embedding only a small tail shard.
-- **macOS / Linux only.** Windows (`python` vs `python3`, `zg.cmd`, path separators) is unhandled.
+- **macOS / Linux only.** Windows (`zg.cmd`, path separators) is unhandled.
 - Cross-workspace search covers only workspaces that have been initialized — projects you never opened in pi are not pre-indexed.
 - **No time decay.** Ranking is pure relevance; conflicting old/new memories are resolved by the agent, not by the ranker.
 - Time filtering granularity is the session file (its `mtime` is the session start), not individual messages.
-- Needs `zg`, `rg`, `python3` on `PATH`.
+- Needs `zg` and `rg` on `PATH`.
 
 ## Development
 
@@ -218,15 +222,16 @@ No runtime npm dependencies — the TypeScript code uses only `node:` builtins. 
 # (unpacking pi-coding-agent is 400 MB+ and is not needed for tsc or the tests)
 npm i --no-package-lock --legacy-peer-deps
 npx tsc --noEmit -p tsconfig.json        # same strict config CI runs
-node --experimental-strip-types --test   # 32 tests: no zg, no network, no Python
+node --experimental-strip-types --test   # 68 tests: no zg, no network, no Python
 ```
 
 `types/peers.d.ts` declares the pi peer dependencies as ambient modules, which is why nothing
-has to be symlinked out of your global `pi` install any more. The Python side needs nothing but the standard library — run it directly:
+has to be symlinked out of your global `pi` install any more. The Python files need nothing but
+the standard library — they are the **migration oracle**, not the runtime:
 
 ```bash
-python3 extensions/zg-memory/zgmem.py --help
-python3 extensions/zg-memory/tests/test_zgmem.py
+node --experimental-strip-types tests/differential/cli_differential.ts   # py vs ts, byte-for-byte (module E)
+python3 extensions/zg-memory/tests/test_zgmem.py                         # 25 Python tests, frozen until module G
 ```
 
 ## License

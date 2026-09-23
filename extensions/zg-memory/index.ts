@@ -85,11 +85,13 @@ function workspaceFromCtx(ctx?: any): string {
 function sessionFileFromCtx(ctx?: any): string | undefined {
   try { return ctx?.sessionManager?.getSessionFile?.() || undefined; } catch { return undefined; }
 }
-const PY_MEM = path.join(EXT_DIR, "zgmem.py");
-const PY_ETL = path.join(EXT_DIR, "jsonl2corpus.py");
+const LIB_CLI = path.join(EXT_DIR, "lib", "cli.ts");
+const LIB_ETL = path.join(EXT_DIR, "lib", "etl.ts");
+/** node ≥22.6 要靠它才能直接跑 .ts（24 起默认开启）；显式带上, 两个版本行为一致 */
+const STRIP_TYPES = "--experimental-strip-types";
 const EMBEDDING = process.env.ZGMEM_EMBEDDING || "local/potion-multilingual-128m";
 
-/** 会话关闭时中止在跑的 python/zg 子进程(防超时半写/孤儿 zg) */
+/** 会话关闭时中止在跑的 lib/zg 子进程(防超时半写/孤儿 zg) */
 let _abort = new AbortController();
 
 /**
@@ -105,9 +107,15 @@ function liveAbort(): AbortController {
   return _abort;
 }
 
-function runPy(script: string, args: string[], timeoutMs = 120_000, extraSignal?: AbortSignal): Promise<string> {
+/**
+ * 跑 lib/ 下的 TS 入口(模块 F): 执行体由 `python3 <script>` 换成 `node <script>.ts`,
+ * 仍是**子进程**而不是进程内直调 —— lib 是同步实现(15 处 spawnSync, 忠于 Python 的
+ * subprocess.run), 进程内直调会占住 pi 的 event loop 冻住 TUI; 子进程同时提供
+ * 崩溃隔离与可杀(session_shutdown 能中止)。理由与实测见 docs/plan-ts-migration.md 模块 F。
+ */
+function runLib(script: string, args: string[], timeoutMs = 120_000, extraSignal?: AbortSignal): Promise<string> {
   const signal = extraSignal ? AbortSignal.any([liveAbort().signal, extraSignal]) : liveAbort().signal;
-  return execFileAsync("python3", [script, ...args], {
+  return execFileAsync(process.execPath, [STRIP_TYPES, script, ...args], {
     maxBuffer: 16 * 1024 * 1024,
     timeout: timeoutMs,
     signal,
@@ -141,7 +149,7 @@ function buildFullIndex(sessionsDir: string, corpusDir: string): Promise<string>
     if (epoch !== _epoch) throw new Error("session 已切换, 排队中的全量构建作废");
     if (!hasSessionFiles(sessionsDir)) return `skip: no jsonl in ${sessionsDir}`;
     try {
-      await runPy(PY_ETL, [path.join(sessionsDir, "*.jsonl"), corpusDir]);
+      await runLib(LIB_ETL, [path.join(sessionsDir, "*.jsonl"), corpusDir]);
     } catch (e: any) {
       // ETL 里某个 session 挂了(exit 2): 仍然建索引 —— 别让一个坏会话废掉整库查询,
       // 但必须吵出来(以前 ETL 吞异常 + exit 0, 表面一切正常)
@@ -164,7 +172,7 @@ function scheduleRefresh(sessionsDir: string, ws: string): void {
   enqueue(async () => {
     if (epoch !== _epoch) return;            // session 已轮换: 排队中的旧刷新作废, 不再往旧会话外 spawn
     try {
-      await runPy(PY_MEM, ["refresh", "--sessions-dir", sessionsDir, "--workspace", ws], 600_000);
+      await runLib(LIB_CLI, ["refresh", "--sessions-dir", sessionsDir, "--workspace", ws], 600_000);
     } finally {
       if (epoch === _epoch) {
         _lastRefreshAt = Date.now();   // 失败也计冷却, 防持续失败每回合狂刷
@@ -252,11 +260,11 @@ export default function (pi: ExtensionAPI) {
         if (params.mode && params.mode !== "auto") args.push("--mode", params.mode);
         // '--' 隔离: query 以 '-' 开头也不会被 argparse 当成选项
         args.push("--workspace", ws, "--", params.query);
-        const out = await runPy(PY_MEM, args, 120_000, _signal);
+        const out = await runLib(LIB_CLI, args, 120_000, _signal);
         let pairs: any[] = [];
         try { pairs = JSON.parse(out); } catch { }
         if (!Array.isArray(pairs)) {
-          // python 会把错误文本打到 stdout; 不能再伪装成"没有命中"
+          // 底层(CLI/zg)会把错误文本打到 stdout; 不能再伪装成"没有命中"
           return toolResult("检索引擎输出不是 JSON 数组(可能出错): " + out.slice(0, 300), { error: "non-json", raw: out.slice(0, 300) });
         }
         if (pairs.length === 0) {
@@ -300,8 +308,8 @@ export default function (pi: ExtensionAPI) {
         const ws = params.workspace ?? workspaceFromCtx(ctx);
         await ensureIndexReady(ctx, ws);   // refs 可能指向其他 workspace(workspace=all 扇出)
         const out = mode === "ctx"
-          ? await runPy(PY_MEM, ["ctx", params.session, String(params.corpus_line), "--span", String(params.span ?? 3), "--workspace", ws], 120_000, _signal)
-          : await runPy(PY_MEM, ["show", params.session, String(params.corpus_line), "--full", "--workspace", ws], 120_000, _signal);
+          ? await runLib(LIB_CLI, ["ctx", params.session, String(params.corpus_line), "--span", String(params.span ?? 3), "--workspace", ws], 120_000, _signal)
+          : await runLib(LIB_CLI, ["show", params.session, String(params.corpus_line), "--full", "--workspace", ws], 120_000, _signal);
         return toolResult(truncateStr(out));
       } catch (e: any) {
         return toolResult("深钻失败: " + (e?.message || String(e)), { error: String(e) });
@@ -320,14 +328,14 @@ export default function (pi: ExtensionAPI) {
       try {
         if (arg === "refresh") {
           if (!sessionsDir) { ctx.ui.notify(`no sessions dir for workspace ${ws}`, "error"); return; }
-          const out = await enqueue(() => runPy(PY_MEM, ["refresh", "--sessions-dir", sessionsDir, "--workspace", ws], 600_000));   // 与自动刷新/全量构建互斥
+          const out = await enqueue(() => runLib(LIB_CLI, ["refresh", "--sessions-dir", sessionsDir, "--workspace", ws], 600_000));   // 与自动刷新/全量构建互斥
           ctx.ui.notify(out.slice(-500), "info");
         } else if (arg === "reindex" || arg === "") {
           if (!sessionsDir) { ctx.ui.notify(`no sessions dir for workspace ${ws}`, "error"); return; }
           const msg = await buildFullIndex(sessionsDir, corpusDirOf(ws));   // 内部走串行队列
           ctx.ui.notify(msg.startsWith("skip:") ? `跳过: workspace ${ws} 尚无会话文件` : "已全量重建 zg 记忆索引", "info");
         } else if (arg === "sessions") {
-          const out = await runPy(PY_MEM, ["sessions", "--workspace", ws]);
+          const out = await runLib(LIB_CLI, ["sessions", "--workspace", ws]);
           ctx.ui.notify(out.slice(-2000), "info");
         } else {
           ctx.ui.notify(`未知子命令: ${arg}`, "error");
@@ -357,7 +365,7 @@ export default function (pi: ExtensionAPI) {
     });
   });
 
-  // ---------- 会话关闭: 中止在跑的 python/zg 子进程(幂等, 防半写/孤儿进程) ----------
+  // ---------- 会话关闭: 中止在跑的 lib/zg 子进程(幂等, 防半写/孤儿进程) ----------
   pi.on("session_shutdown", async () => {
     _epoch++;                 // 队列里排队未起跑的旧任务作废
     _refreshQueued = false;

@@ -49,7 +49,7 @@
 ```
 ~/.pi/agent/sessions/**/*.jsonl     原始会话（完整：时间 / 角色 / thinking / 工具调用）
         │
-        │  jsonl2corpus.py     清洗：只留 user + assistant 文本，去掉噪声
+        │  lib/etl.ts           清洗：只留 user + assistant 文本，去掉噪声
         ▼
 ~/.pi/agent/zgmem/<workspace>/corpus/     干净语料，按 session 分片
         │        <session>.p0001.txt, p0002, … + 一个未冻结的尾片
@@ -77,7 +77,6 @@ zg_memory_open   ──►  回指 JSONL 深钻（thinking / 工具调用 / 上�
 | [`pi`](https://pi.dev) | 宿主 agent | `pi --version` |
 | [`zvec-grep`](https://github.com/zvec-ai/zvec-grep) | 搜索引擎（`zg`） | `npm i -g @zvec/zvec-grep && zg --version` |
 | `rg`（ripgrep） | 字面精确模式 | `rg --version` |
-| `python3` | ETL + CLI（3.9+） | `python3 --version` |
 
 ```bash
 pi install git:github.com/happyTonakai/pi-zg-mem
@@ -93,11 +92,11 @@ pi list          # 确认已注册
 **验证是否正常**
 
 ```bash
-python3 extensions/zg-memory/tests/test_zgmem.py     # 25 个离线 Python 用例，不联网、不需要 zg
-node --experimental-strip-types --test                # 32 个 TypeScript 用例，约束相同
+node --experimental-strip-types --test                # 68 个 TypeScript 用例：不联网、不需要 zg、不需要 Python
+python3 extensions/zg-memory/tests/test_zgmem.py     # 25 个 Python 用例（迁移期裁判，模块 G 删）
 ```
 
-[CI](.github/workflows/ci.yml) 跑：Python 套件（3.9 / 3.11 / 3.13，Ubuntu 与 macOS 双平台）、TypeScript 套件（Node 22 / 24，双平台）、一个 `tsc --noEmit` 类型检查，以及一个端到端跑真实入口的 pipeline job（ETL → 无变化 refresh → 增量 refresh），免得管线悄悄坏掉。
+[CI](.github/workflows/ci.yml) 跑：TypeScript 套件（Node 22 / 24，Ubuntu 与 macOS 双平台）、`tsc --noEmit` 类型检查，以及 Python 套件（3.9 / 3.11 / 3.13）与一个端到端跑 Python 入口的 pipeline job（ETL → 无变化 refresh → 增量 refresh）—— Python 那两个 job 是迁移期裁判，最终与 `.py` 一起删。同一件事在 TypeScript 运行时上由 `tests/runtime_boundary.test.ts` 永久守着（起真 `node lib/*.ts` 子进程）。
 
 ## 使用
 
@@ -132,19 +131,24 @@ node --experimental-strip-types --test                # 32 个 TypeScript 用例
 CLI 不依赖 pi。在克隆目录里：
 
 ```bash
-Z=./extensions/zg-memory/zgmem.py     # 通过 pi 安装后则在 ~/.pi/agent/git/github.com/happyTonakai/pi-zg-mem/extensions/zg-memory/zgmem.py
+# --experimental-strip-types：只在 node 22 上必需（24 起默认剥离类型）
+Z=./extensions/zg-memory/lib/cli.ts   # 通过 pi 安装后则在 ~/.pi/agent/git/github.com/happyTonakai/pi-zg-mem/extensions/zg-memory/lib/cli.ts
+alias zgc="node --experimental-strip-types $Z"
 
-python3 $Z query "codegraph 和 zvec-grep 有什么区别" --top 3
-python3 $Z query "上次那个报错码" --mode rg
-python3 $Z query "上周说过什么" --since 7
-python3 $Z query "..." --workspace all           # 跨所有 workspace
-python3 $Z query "..." --json                    # 结构化输出（含 ref 与时间戳）
+zgc query "codegraph 和 zvec-grep 有什么区别" --top 3
+zgc query "上次那个报错码" --mode rg
+zgc query "上周说过什么" --since 7
+zgc query "..." --workspace all           # 跨所有 workspace
+zgc query "..." --json                    # 结构化输出（含 ref 与时间戳）
 
-python3 $Z show <session> <corpus_line> --full    # 单条原始记录
-python3 $Z ctx  <session> <corpus_line> --span 5  # 前后上下文
-python3 $Z sessions                               # 列出已索引会话
-python3 $Z refresh --sessions-dir <dir>           # 增量刷新
+zgc show <session> <corpus_line> --full    # 单条原始记录
+zgc ctx  <session> <corpus_line> --span 5  # 前后上下文
+zgc sessions                               # 列出已索引会话
+zgc refresh --sessions-dir <dir>           # 增量刷新
 ```
+
+> Python 前端（`zgmem.py`）参数一样、现在也一样能用，但它不再是运行时：
+> `python3 zgmem.py <argv>` ≡ `node lib/cli.ts <argv>`，逐字节一致（模块 E 差分）。
 
 在 pi 里则用 `/zgmem refresh`、`/zgmem reindex`、`/zgmem sessions`。
 
@@ -195,19 +199,19 @@ python3 $Z refresh --sessions-dir <dir>           # 增量刷新
 
 ## 现状、边界与后续
 
-**已完成并验证：** ETL、混合 + 精确召回、回指深钻、增量维护、extension 工具暴露。25 个离线 Python 用例（`python3 extensions/zg-memory/tests/test_zgmem.py`）加 32 个 TypeScript 用例，外加真机 `zg` 端到端冒烟。Python 设计经过独立评审（[`docs/reviews/`](docs/reviews/)），TypeScript 迁移过程中又做了三轮 reviewer，两批结论与修复均有记录，后者在 [`docs/plan-ts-migration.md`](docs/plan-ts-migration.md)。
+**已完成并验证：** ETL、混合 + 精确召回、回指深钻、增量维护、extension 工具暴露。68 个 TypeScript 用例（`node --experimental-strip-types --test`）加 25 个 Python 用例（迁移期裁判）与真机 `zg` 端到端冒烟。Python 设计经过独立评审（[`docs/reviews/`](docs/reviews/)），TypeScript 迁移过程中又做了三轮 reviewer，两批结论与修复均有记录，后者在 [`docs/plan-ts-migration.md`](docs/plan-ts-migration.md)。
 
-**迁移进行中。** 运行时正在从 Python 逐模块迁到 TypeScript，每一步都有与 Python 实现逐字节对拍的证据。语料层与 ETL 层已迁移完（`extensions/zg-memory/lib/`）；召回层仍是 Python，因此**pi 扩展目前依然靠 `python3` 子进程**，`python3` 在它落地前仍是硬依赖。计划、逐模块证据与未迁移用例清单见 [`docs/plan-ts-migration.md`](docs/plan-ts-migration.md)。
+**迁移进行中。** 运行时已逐模块从 Python 迁到 TypeScript，每一步都有与 Python 实现逐字节对拍的证据。从模块 F 起**运行时已不再起 `python3` 子进程** —— 扩展走的是 `node lib/*.ts` 子进程（`lib/cli.ts` / `lib/etl.ts`）；`python3` 现在只用于迁移期的差分对拍（`tests/differential/`，模块 G 与 `.py` 一起删）。计划、逐模块证据与未迁移用例清单见 [`docs/plan-ts-migration.md`](docs/plan-ts-migration.md)。
 
 **已知边界**
 
 - **只做主动召回。** 被动捕获 / 自动沉淀成长期笔记不在本版内——那是有意留的下一步。
 - **每轮刷新成本有约 4 秒的下界**（`zg` 固定模型加载），即使只重嵌一个小尾片。
-- **仅 macOS / Linux。** Windows（`python` vs `python3`、`zg.cmd`、路径分隔符）未处理。
+- **仅 macOS / Linux。** Windows（`zg.cmd`、路径分隔符）未处理。
 - 跨 workspace 检索只覆盖初始化过的 workspace——你从未在 pi 里打开过的项目不会预先建索引。
 - **不做时间衰减。** 排序是纯相关性；新旧记忆冲突由 agent 裁决，而不是排序器。
 - 时间过滤粒度是会话文件（其 `mtime` 即会话开始时间），不是消息级。
-- 依赖 `zg`、`rg`、`python3` 在 `PATH` 上。
+- 依赖 `zg`、`rg` 在 `PATH` 上。
 
 ## 开发
 
@@ -218,15 +222,15 @@ python3 $Z refresh --sessions-dir <dir>           # 增量刷新
 # （`pi-coding-agent` 解包 400MB+，tsc 和测试都用不到）
 npm i --no-package-lock --legacy-peer-deps
 npx tsc --noEmit -p tsconfig.json        # 与 CI 相同的严格配置
-node --experimental-strip-types --test   # 32 个用例：不需要 zg、不联网、不需要 Python
+node --experimental-strip-types --test   # 68 个用例：不需要 zg、不联网、不需要 Python
 ```
 
 `types/peers.d.ts` 把 pi 的 peer 依赖声明成环境模块，因此不再需要从全局 `pi` 安装里软链
-`node_modules` 了。Python 侧除标准库外无依赖，直接跑即可：
+`node_modules` 了。Python 文件除标准库外无依赖，它们是**迁移期裁判**而不是运行时：
 
 ```bash
-python3 extensions/zg-memory/zgmem.py --help
-python3 extensions/zg-memory/tests/test_zgmem.py
+node --experimental-strip-types tests/differential/cli_differential.ts   # py vs ts 逐字节（模块 E）
+python3 extensions/zg-memory/tests/test_zgmem.py                         # 25 个 Python 用例，冻结到模块 G
 ```
 
 ## 许可

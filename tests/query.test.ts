@@ -206,6 +206,36 @@ function queryEnv(home: string, ws: string): q.QueryEnv {
   return q.queryEnv({ ZGMEM_DIR: home, ZGMEM_SCOPE: ws } as NodeJS.ProcessEnv);
 }
 
+// ---------- 子进程输出上限（Node maxBuffer 回归） ----------
+
+/**
+ * Node 的 spawnSync 默认 maxBuffer 只有 1 MiB（Python 的 subprocess.run 没上限）。
+ * 超限时 spawnSync 给 error.code=ERR_CHILD_PROCESS_STDIO_MAXBUFFER + status=null；
+ * 若不显式 check，rg 召回会被当成“没命中”而返回空数组，**静默给出错答案**
+ * （真机全量 rg 命中早就过 1 MiB）。这里把上限压到 1 字节，钉住“必须抛”而不是“返回空”。
+ */
+test("rgCandidates.raises_on_maxbuffer_instead_of_silently_returning_nothing", () => {
+  const { scopeA } = buildFixture();
+  const baseline = q.rgCandidates(scopeA, { query: MARKER }, 5, "ws-a");
+  assert.ok(baseline.length > 0, "前置：这个 fixture 本来能命中，否则“返回空”也能骗过断言");
+
+  const key = "ZGMEM_SUBPROCESS_MAX_BUFFER";
+  const old = process.env[key];
+  process.env[key] = "1";
+  try {
+    assert.throws(
+      () => q.rgCandidates(scopeA, { query: MARKER }, 5, "ws-a"),
+      (e: unknown) => /ENOBUFS/.test(String((e as { code?: string })?.code ?? "") + String((e as Error)?.message ?? "")),
+      "超限必须是显式异常，不能静默返回 []",
+    );
+  } finally {
+    if (old === undefined) delete process.env[key];
+    else process.env[key] = old;
+  }
+  // 恢复后又能正常命中（证明上面压小上限就是唯一变量）
+  assert.equal(q.rgCandidates(scopeA, { query: MARKER }, 5, "ws-a").length, baseline.length);
+});
+
 test("runQuery.workspace_all_dedupes_by_session_not_by_jsonl_line", () => {
   const { home } = buildFixture();
   // ws-a 与 ws-b 各有一份 sessP 拷贝（jsonl 路径不同、session/jsonl_line 相同）→ 只能出一条；

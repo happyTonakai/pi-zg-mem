@@ -34,6 +34,20 @@ function intEnv(name: string, def: number): number {
   return n;
 }
 
+/**
+ * rg / zg 子进程的输出上限。
+ *
+ * Node 的 spawnSync 默认 `maxBuffer` 只有 **1 MiB**，而 Python 的 subprocess.run 没有上限。
+ * 这两个子进程的输出是整份语料（实测 rg 全量命中级 1 MB+），超限时 spawnSync 会返回
+ * `error=ERR_CHILD_PROCESS_STDIO_MAXBUFFER` 且 `status=null`；若按普通失败处理，
+ * rg 召回就会被当成“没有命中”而**静默给出错答案**。所以这里给一个够大的上限，
+ * 并且**每次调用都读环境变量**（ZGMEM_SUBPROCESS_MAX_BUFFER），好让回归测试把它调小、
+ * 钉住“不许静默吞掉”这条性质。
+ */
+export function subprocessMaxBuffer(): number {
+  return intEnv("ZGMEM_SUBPROCESS_MAX_BUFFER", 256 * 1024 * 1024);
+}
+
 /** seq 位数不设上界（4 位起，超过 9999 片自然涨到 5 位）：长会话可以无限分片。 */
 // py: _SEG_RE = re.compile(r"^(?P<sid>.+)\.p(?P<seq>\d{4,})\.txt$")
 const SEG_RE = /^(.+)\.p(\d{4,})\.txt$/;
