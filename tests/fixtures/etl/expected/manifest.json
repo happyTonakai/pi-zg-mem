@@ -1,0 +1,172 @@
+{
+  "version": 2,
+  "sessions": {
+    "s-big": {
+      "jsonl_path": "__SESSIONS_DIR__/s-big.jsonl",
+      "start_ts": 1700000200000,
+      "jsonl_mtime": 1700000000000,
+      "jsonl_size": 70550,
+      "last_jsonl_line": 4,
+      "last_row_jsonl_line": 4,
+      "last_offset": 70550,
+      "prefix_sha": "51412f05553b67c12a32086f1c44074f6234a53405d00a6cf5500220a0a4010a",
+      "rows": 4,
+      "segments": 2
+    },
+    "s-empty": {
+      "jsonl_path": "__SESSIONS_DIR__/s-empty.jsonl",
+      "start_ts": null,
+      "jsonl_mtime": 1700000000000,
+      "jsonl_size": 1,
+      "last_jsonl_line": 1,
+      "last_row_jsonl_line": 0,
+      "last_offset": 1,
+      "prefix_sha": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+      "rows": 0,
+      "segments": 0
+    },
+    "s-long": {
+      "jsonl_path": "__SESSIONS_DIR__/s-long.jsonl",
+      "start_ts": 1700000100000,
+      "jsonl_mtime": 1700000000000,
+      "jsonl_size": 56675,
+      "last_jsonl_line": 410,
+      "last_row_jsonl_line": 410,
+      "last_offset": 56675,
+      "prefix_sha": "ddf80f8f43ae0fe2dd09523b19b3d0444ef3fd5a4a2dc0c8fdae08fb6cce6254",
+      "rows": 410,
+      "segments": 3
+    },
+    "s-noeol": {
+      "jsonl_path": "__SESSIONS_DIR__/s-noeol.jsonl",
+      "start_ts": 1700000010000,
+      "jsonl_mtime": 1700000000000,
+      "jsonl_size": 289,
+      "last_jsonl_line": 1,
+      "last_row_jsonl_line": 1,
+      "last_offset": 135,
+      "prefix_sha": "6f7b815d0f96847fecf1a64d13c00a90e9ef96015c8a1da485301e80c9942e1e",
+      "rows": 1,
+      "segments": 1
+    },
+    "s-noise": {
+      "jsonl_path": "__SESSIONS_DIR__/s-noise.jsonl",
+      "start_ts": 3,
+      "jsonl_mtime": 1700000000000,
+      "jsonl_size": 541,
+      "last_jsonl_line": 6,
+      "last_row_jsonl_line": 5,
+      "last_offset": 541,
+      "prefix_sha": "096dcec9edb947ea8fb539778e44bbc1363f153b9e4bbff5eb7236e5622366fd",
+      "rows": 1,
+      "segments": 1
+    },
+    "s-small": {
+      "jsonl_path": "__SESSIONS_DIR__/s-small.jsonl",
+      "start_ts": 1700000001000,
+      "jsonl_mtime": 1700000000000,
+      "jsonl_size": 636,
+      "last_jsonl_line": 4,
+      "last_row_jsonl_line": 4,
+      "last_offset": 636,
+      "prefix_sha": "0a40fbaceabd1ab557f18562c9ad02c3f370aa8e681ab6e388f14e477d7ed7d9",
+      "rows": 3,
+      "segments": 1
+    },
+    "s.with.dot": {
+      "jsonl_path": "__SESSIONS_DIR__/s.with.dot.jsonl",
+      "start_ts": 1700000300000,
+      "jsonl_mtime": 1700000000000,
+      "jsonl_size": 279,
+      "last_jsonl_line": 2,
+      "last_row_jsonl_line": 2,
+      "last_offset": 279,
+      "prefix_sha": "4a6cc224ce1464a12a7032e1d6a2a684bcb6c970e00749d37d54cde6899bd768",
+      "rows": 2,
+      "segments": 1
+    }
+  },
+  "segments": {
+    "s-big.p0001.txt": {
+      "session_id": "s-big",
+      "seq": 1,
+      "rows": 2,
+      "start_jsonl_line": 1,
+      "start_corpus_line": 1,
+      "start_ts": 1700000200000,
+      "frozen": true
+    },
+    "s-big.p0002.txt": {
+      "session_id": "s-big",
+      "seq": 2,
+      "rows": 2,
+      "start_jsonl_line": 3,
+      "start_corpus_line": 3,
+      "start_ts": 1700000200002,
+      "frozen": false
+    },
+    "s-long.p0001.txt": {
+      "session_id": "s-long",
+      "seq": 1,
+      "rows": 200,
+      "start_jsonl_line": 1,
+      "start_corpus_line": 1,
+      "start_ts": 1700000100000,
+      "frozen": true
+    },
+    "s-long.p0002.txt": {
+      "session_id": "s-long",
+      "seq": 2,
+      "rows": 200,
+      "start_jsonl_line": 201,
+      "start_corpus_line": 201,
+      "start_ts": 1700000100200,
+      "frozen": true
+    },
+    "s-long.p0003.txt": {
+      "session_id": "s-long",
+      "seq": 3,
+      "rows": 10,
+      "start_jsonl_line": 401,
+      "start_corpus_line": 401,
+      "start_ts": 1700000100400,
+      "frozen": false
+    },
+    "s-noeol.p0001.txt": {
+      "session_id": "s-noeol",
+      "seq": 1,
+      "rows": 1,
+      "start_jsonl_line": 1,
+      "start_corpus_line": 1,
+      "start_ts": 1700000010000,
+      "frozen": false
+    },
+    "s-noise.p0001.txt": {
+      "session_id": "s-noise",
+      "seq": 1,
+      "rows": 1,
+      "start_jsonl_line": 5,
+      "start_corpus_line": 1,
+      "start_ts": 3,
+      "frozen": false
+    },
+    "s-small.p0001.txt": {
+      "session_id": "s-small",
+      "seq": 1,
+      "rows": 3,
+      "start_jsonl_line": 1,
+      "start_corpus_line": 1,
+      "start_ts": 1700000001000,
+      "frozen": false
+    },
+    "s.with.dot.p0001.txt": {
+      "session_id": "s.with.dot",
+      "seq": 1,
+      "rows": 2,
+      "start_jsonl_line": 1,
+      "start_corpus_line": 1,
+      "start_ts": 1700000300000,
+      "frozen": false
+    }
+  }
+}

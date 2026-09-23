@@ -1,0 +1,2 @@
+{"type": "message", "message": {"role": "user", "timestamp": 1700000010000, "content": [{"type": "text", "text": "完整的一行"}]}}
+{"type": "message", "message": {"role": "assistant", "timestamp": 1700000011000, "content": [{"type": "text", "text": "最后一行没有换行结尾"}]}}

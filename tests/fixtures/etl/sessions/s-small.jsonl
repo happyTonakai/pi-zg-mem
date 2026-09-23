@@ -1,0 +1,4 @@
+{"type": "message", "message": {"role": "user", "timestamp": 1700000001000, "content": [{"type": "text", "text": "  用\t\ttab  和  多空格 \n 换行  的问句  "}]}}
+{"type": "toolResult", "message": {"role": "tool", "timestamp": 1700000001500, "content": [{"type": "toolResult", "content": "ok"}]}}
+{"type": "message", "message": {"role": "assistant", "timestamp": 1700000002000, "content": [{"type": "text", "text": "回答里有 CJK 与 emoji 🎉 和 \"引号\" 与反斜杠 n 字面量"}]}}
+{"type": "message", "message": {"role": "user", "timestamp": 1700000003000, "content": [{"type": "text", "text": "第二个问题"}]}}

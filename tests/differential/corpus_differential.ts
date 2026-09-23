@@ -279,7 +279,7 @@ function buildPlan(rng: () => number) {
     const nseg = 1 + Math.floor(rng() * 3);
     let globalLine = 1;
     const all: R[] = [];
-    man.sessions[sid] = { first_ts: 0, last_ts: 0 };
+    man.sessions[sid] = { start_ts: 0, jsonl_size: 0 };
     for (let seq = 1; seq <= nseg; seq++) {
       const rows = genRows(rng, Math.floor(rng() * 7));
       all.push(...rows);
@@ -292,13 +292,13 @@ function buildPlan(rng: () => number) {
         rows: rows.length,
         frozen: seq < nseg,
         start_ts: startTs,
-        end_ts: rows.length ? rows[rows.length - 1].ts : startTs,
+        start_jsonl_line: 0,
       };
       globalLine += rows.length;
       plan.push({ fname, rows, startTs });
     }
     if (all.length) {
-      man.sessions[sid] = { first_ts: all[0].ts, last_ts: all[all.length - 1].ts };
+      man.sessions[sid] = { start_ts: all[0].ts, jsonl_size: all.length };
     }
   }
   return { plan, man };

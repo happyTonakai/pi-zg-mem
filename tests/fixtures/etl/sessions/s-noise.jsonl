@@ -1,0 +1,6 @@
+{ this is not json
+{"type": "session_start", "id": "x"}
+{"type": "message", "message": {"role": "system", "timestamp": 1, "content": [{"type": "text", "text": "\u7cfb\u7edf\u6d88\u606f"}]}}
+{"type": "message", "message": {"role": "user", "timestamp": 2, "content": [{"type": "image", "url": "x.png"}]}}
+{"type": "message", "message": {"role": "assistant", "timestamp": 3, "content": [{"type": "text", "text": "   "}]}}
+{"type": "toolResult", "message": {"role": "tool", "timestamp": 4, "content": [{"type": "toolResult", "content": "ok"}]}}

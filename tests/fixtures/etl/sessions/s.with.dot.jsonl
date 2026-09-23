@@ -1,0 +1,2 @@
+{"type": "message", "message": {"role": "user", "timestamp": 1700000300000, "content": [{"type": "text", "text": "sid 里有点"}]}}
+{"type": "message", "message": {"role": "assistant", "timestamp": 1700000300001, "content": [{"type": "text", "text": "一样要能进语料"}]}}
