@@ -63,6 +63,11 @@ Python 在**全部门类通过验收前不删**。`index.ts` 按命令逐条切�
    数字只是对拍当天的快照）。
    最后再做一次真 `zg` 端到端冒烟。
 
+   CLI 边界（argparse 那一层）另有 `tests/differential/cli_differential.ts`：两侧比
+   **stdout 字节 + stderr 字节 + 退出码**（`-h`/usage 的换行与缩进、`--who bogus` 之类的报错文本、
+   `show --workspace all` 的拒绝路径都在内）。这一层是 25 个 Python 用例**盖不到**的 ——
+   它们只覆盖库函数，而 cli.ts 是用户直接看的那一层。
+
 现有 25 个用例的归属（迁移时按此对齐）：
 
 - `TestH1SeqAllocator` 3 个 → A
@@ -75,20 +80,27 @@ Python 在**全部门类通过验收前不删**。`index.ts` 按命令逐条切�
 
 ## 已知语义差异（需要决策 / 必须记录）
 
-### 1. 跨进程锁：`fcntl.flock` → ？（待拍板）
+### 1. 跨进程锁：`fcntl.flock` → 原子创建 + 租约（已定：L1）
 
 Python 用 `fcntl.flock(fh, LOCK_EX)`，**进程退出/崩溃时内核自动释放**。
 Node **没有**原生 flock，macOS 也没有 `flock(1)` 命令（那是 util-linux）。
 候选：
 
-- **方案 L1（建议）**：`open(lock, 'wx')` 原子创建 + 写入 `{pid, ts}`，
-  超过租约（如 10 分钟）视为崩溃残留可接管。可移植、崩溃可恢复；
-  代价是租约过期后理论上可双持锁（Python 的 flock 不会）。
+- **方案 L1（采用）**：`open(lock, 'wx')` 原子创建 + 写入 `{pid, ts}`，
+  超过租约（`ZGMEM_LOCK_LEASE_MS`，默认 10 分钟）视为崩溃残留可接管。
+  可移植、崩溃可恢复；代价是租约过期后理论上可双持锁（flock 不会）。
 - 方案 L2：`mkdir` 原子锁（同样需租约，无额外好处）。
 - 方案 L3：引入原生依赖（如 `proper-lockfile`）—— 违背本仓库零依赖取向，不建议。
 
-我的判断：L1 足够，因为真正的抗损坏靠的是**原子写 + staging + manifest 快照回滚**，
-锁只负责"别让两个刷新同时干活"。**但这确实弱于 flock，需要你确认接受。**
+结论：L1 足够，因为真正的抗损坏靠的是**原子写 + staging + manifest 快照回滚**，
+锁只负责"别让两个刷新同时干活"。
+
+**对拍观察（`interop/py-leftover-lock`）**：Python 的 flock 释放后**锁文件留在磁盘上（空文件）**，
+L1 只能靠"文件年龄 > 租约"判定它是残留 —— 于是「刚跑完 Python refresh，再用 TS 跑 refresh」
+要干等满租约才能开工（对拍里把租约压到 3s 才不至于真等 10 分钟：实测 py 47ms / ts 3046ms，
+两侧 **字节输出一致**，差的只是等待时长）。**不为此加宽限**：该场景只存在于「Python 与 TS 交替跑」
+的迁移期，而 Python 在 G 阶段整体删除；删干净后这就是一条纯 TS 语义 —— 崩溃留下的 `{pid, ts}` 锁
+等满租约才被接管，正确性由原子写 + 快照回滚兜底。
 
 ### 2. 库函数不再 `print`
 

@@ -209,24 +209,6 @@ python3 $Z refresh --sessions-dir <dir>           # 增量刷新
 - 时间过滤粒度是会话文件（其 `mtime` 即会话开始时间），不是消息级。
 - 依赖 `zg`、`rg`、`python3` 在 `PATH` 上。
 
-## 仓库结构
-
-```
-extensions/zg-memory/
-  index.ts           pi 扩展：注册 zg_memory_query / zg_memory_open + /zgmem 命令
-  jsonl2corpus.py    ETL：会话 JSONL → 分片可检索语料（含 manifest、原子写、文件锁）
-  zgmem_corpus.py    分片 / 配对共享库（被上面两个脚本 import）
-  zgmem.py           召回与回指 CLI（query / show / ctx / sessions / refresh）
-  lib/corpus.ts      `zgmem_corpus.py` 的 TypeScript 移植（迁移模块 A — 已完成）
-  lib/etl.ts         `jsonl2corpus.py` 的 TypeScript 移植（迁移模块 B — 已完成）
-  tests/             Python 套件（25 个离线用例）
-  README.md          设计与语料格式深入说明
-tests/               TypeScript 侧：*.test.ts、黄金样本、差分对拍脚本
-types/peers.d.ts     pi peer 依赖的环境声明桩（让 tsc 无需安装它们）
-docs/plan-ts-migration.md   Python → TypeScript 迁移计划 + 逐模块证据
-docs/reviews/        独立评审记录
-```
-
 ## 开发
 
 运行时不需要 npm 依赖——TypeScript 侧只用 `node:` 内置模块。只有类型检查需要 `devDependencies`（精确锁版）：

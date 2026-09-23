@@ -209,24 +209,6 @@ This indexes **all of your session history** — including thinking blocks and t
 - Time filtering granularity is the session file (its `mtime` is the session start), not individual messages.
 - Needs `zg`, `rg`, `python3` on `PATH`.
 
-## Repository layout
-
-```
-extensions/zg-memory/
-  index.ts           pi extension: registers zg_memory_query / zg_memory_open + the /zgmem command
-  jsonl2corpus.py    ETL: session JSONL → sharded, searchable corpus (+ manifest, atomic writes, locking)
-  zgmem_corpus.py    sharding / pair-matching shared library (imported by both)
-  zgmem.py           recall + drill-down CLI (query / show / ctx / sessions / refresh)
-  lib/corpus.ts      TypeScript port of zgmem_corpus.py  (migration module A — done)
-  lib/etl.ts         TypeScript port of jsonl2corpus.py  (migration module B — done)
-  tests/             Python suite (25 offline tests)
-  README.md          design + corpus format deep dive
-tests/               TypeScript port: *.test.ts, golden fixtures, differential harnesses
-types/peers.d.ts     ambient stubs for the pi peer deps, so tsc runs without installing them
-docs/plan-ts-migration.md   Python → TypeScript plan + per-module evidence
-docs/reviews/        independent review records
-```
-
 ## Development
 
 No runtime npm dependencies — the TypeScript code uses only `node:` builtins. Only the type-check needs `devDependencies`, pinned to exact versions:
