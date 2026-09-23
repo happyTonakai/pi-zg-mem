@@ -153,5 +153,124 @@ Node **没有**原生 flock，macOS 也没有 `flock(1)` 命令（那是 util-li
 残余差异（已记录、**不可达**，不修）：`parsePythonInt` 只认 ASCII 数字且受 `Number` 精度限制，
 而 Python `int()` 还接受 Unicode 数字、整数无上界。我们自己写入的语料永远是 ASCII 十进制。
 
-CI：新增 `ts-tests` job（node 24 + `node --test`，零依赖、不需要 Python）。
+CI：新增 `ts-tests` job（**node 22 + 24 × ubuntu + macOS**，零依赖、不需要 Python）；
 **在模块 A 就加而不是等到模块 G** —— 否则新写的回归在 CI 里根本不会执行。
+
+模块 B 落地时对 CI 的补充：
+
+- 矩阵加 **node 22**（迁移后的最低支持版本）。类型擦除在 22.6 就有，但 22 需要显式
+  `--experimental-strip-types`（24 起默认开启），所以 CI 命令统一带上这个 flag，两版行为一致
+- “每个模块都能被直接执行”这条断言换成 `--check`（语法：不含不可擦除构造）+
+  `import('./lib/x.ts')`（顶层可执行）。原来直接 `node "$f"` 对带 main guard 的 CLI 型模块
+  （`lib/etl.ts`）会走用法分支 `exit 2`，那是**正确行为**却会让断言误报
+
+### 模块 B `lib/etl.ts` — 完成（2026-09-23）
+
+验收对照：
+
+- [x] `node --test` 全绿：30 个用例（A 的 18 + B 的 12，`tests/etl.test.ts`），不依赖 Python
+- [x] Python 用例对等：`TestH1EtlFailureIsVisible`(1)、`TestH3MigrateCleanup`(5)、
+      `TestM1TailConsistency`(2)、`TestIdempotent`(1) 已按原名迁移；并补上了 A 的欠账
+      `test_long_session_gets_all_fragments_into_manifest`、`test_frozen_prefix_is_stable_and_later_runs_stay_incremental`
+      （原名 `TestIdempotent`）。`test_refine_hit_line_end_to_end` **仍未迁移**（属模块 C 的 CLI 精修
+      路径，现只有 `pickHitRow` 单测），待 C 落地时补 —— 已登记在下方“未迁移用例”清单里。
+- [x] 产物逐字节一致：`tests/fixtures/etl/`（7 个会话 / 9 个分片 + manifest）。
+      manifest 用 `ensure_ascii=False + indent=2`（与 Python `save_manifest` 同参），
+      测试里把临时会话目录换成 `__SESSIONS_DIR__` 占位符后整文件字节比对；分片直接字节比对
+- [x] 真实语料差分：**7 workspace / 210 session 文件 / 172.5MB / 1247 项对拍，与 Python 零差异**
+- [x] 增量语义自证：**增量续读的结果 == 强制全量重建（`--rebuild`）的结果**（语义相等，见下）
+- [x] 无新增运行时依赖；只用可擦除语法
+
+差分对拍覆盖的三个阶段（`tests/differential/etl_differential.ts`，迁移期一次性证据）：
+
+1. **截断**：把每个 JSONL 砍到约 60% 处（`floor(len*0.6)`，大概率切在半行上），两侧从零建 —— 逼出「半行」处理差异
+2. **续读**：恢复完整内容后**不做 rebuild** 再跑一次 —— 逼出半行补齐 / 追加 / frozen 前缀复用差异
+3. **重建**：两侧都 `--rebuild` —— Python/TS 互比，且必须（语义上）等于阶段 2 的增量结果
+
+阶段 3 对阶段 2 只做**语义比较**（`stableStringify` 递归排序键后深比较），不比字节：
+manifest 的 `segments` 是普通对象，键的插入顺序在“重建”与“增量”下合法地不同（重建先把旧条目删除、
+再按本轮处理先后重新登记，增量让旧条目留在原位）。集合与每个条目的内容完全一致 —— Python 自己重建也有同样差异
+（实测两边对称：字节数相同、集合相同、payload 相同）。键序对下游无意义：`openTail` 与查询都按
+`seq` 字段与 manifest 成员关系走，`zgmem` 列 session 时还显式 `sort`。两侧都跑这一断言：
+否则“某个实现的重建结果 != 它自己的增量结果”到底算不算差异就说不清。
+
+写对拍器时踩的坑（**别再用共享父目录**）：manifest 与锁文件都在 corpus 目录的**上一级**
+（`zc.manifestPathFor`），所以每个 run 必须有自己的父目录。第一版让 py/ts 共用一个父目录，
+结果 TS 在等 Python 留下的锁，**锁租约 10 分钟**，对拍直接卡死 10 分钟才报错。
+
+二轮 reviewer 抓到的真分歧（已修，均有用例或对拍证据钉住）：
+
+1. **字符串型 timestamp 被静默变成 0**：`pyIntOfString` 的正则由 `\u{XX}` 拼成，flags 却只有 `g`；
+   无 `u` 时 `\u{9}` 不是合法转义，字符类降级为字面集合，把 ASCII 数字/十六进制字母当空白剥掉。
+   结果 `int("1700000000000")` 在 TS 侧得到 `null` → `ts=0`。修法是补 `u`（`"gu"`）。
+   真实 pi 写的 timestamp 是 number，171.7MB 对拍覆盖不到 —— 这正是“差分只证明测到的输入一致”的例子。
+2. **`"message": []` 使整个 session 消失**：Python `d.get("message") or {}` 把 falsy 的 `[]`/`{}`/`""`/`0`
+   归一成 `{}` 后跳过该行；JS 里 `[]` 是 truthy，`[] || {}` 仍是 `[]` → `isPlainObject([])` 为假 → 抛异常
+   → 该 session 回滚、**整会话不入语料**、退出码 2（Python 只是跳过一行）。新增 `pyTruthy`/`pyOr` 对齐，
+   同一族的 `c["text"]` 判定也一并改掉。
+3. **`jsonl_mtime` 在舍入边界差 1**：Python `int(st.st_mtime * 1000)` 走 double 秒（`tv_sec + tv_nsec/1e9`）；
+   TS 原先用 `Number(ns)/1e9*1000`，舍入点不同。改为读 bigint 纳秒后照抄 Python 运算顺序。
+   分片字节不受影响（`int(ts)` 是整数），只有 manifest 字节不一致 —— 单测/分片对拍看不到。
+4. `migrateCleanup` 的输出行序：Python 在循环里先逐条 print `清理失败`、循环结束才汇总；原 TS 写反了。
+5. `fnmatch` 的 `[^…]`：Python `translate` 对首字符 `^` 做转义（匹配字面 `^`），TS 原先当取反类。
+6. `scan` 的超长单行拼接由单缓冲区改为块列表（原写法每读一块就整体重拷，单行 L 字节耗 `O(L²/CHUNK)`）。
+
+### 已知残余差异（已记录，**不修**）
+
+- **非标准 JSON 字面量 `NaN` / `Infinity` / `-Infinity`**：Python `json.loads` 默认接受这三个字面量，
+  JS `JSON.parse` 拒绝。实测（只有 `NaN` 的行）：Python 把该行以 `ts=0` 收进语料，TS 直接丢行，
+  **两侧都 exit 0**（静默丢一行）；带 `±Infinity` 时 Python `int(inf)` 抛 `OverflowError`（不在
+  `except (TypeError, ValueError)` 内）→ 整个 session 回滚，而 TS 只丢行。
+  不修的理由：真实 pi 写 JSONL 用的是标准编码器，永不产生这三个字面量 —— 172.5MB 真实语料差分
+  **0 差异**就是证据；要忠实复刻还得把“Python 因 Infinity 整个 session 失败”这个本身就别扭的行为
+  一并搬过来，代价大于收益。**若哪天上游真的产生这类行，此处是第一个要动的地方。**
+
+### 未迁移的 Python 用例（清单，避免被当成已迁移）
+
+`extensions/zg-memory/tests/test_zgmem.py` 的用例按模块登记迁移状态：
+
+- [x] `TestH1SeqAllocator.*` / `TestH2HitRefinement.*` → `tests/corpus.test.ts`
+- [x] `TestH1EtlFailureIsVisible` / `TestH3MigrateCleanup` / `TestM1TailConsistency` / `TestIdempotent`
+      → `tests/etl.test.ts`
+- [ ] `TestH2HitRefinement.test_refine_hit_line_end_to_end` —— 依赖尚未迁移的 CLI 精修路径（模块 C）
+- [ ] `TestM2IndexRefresh.*`（11 条，`test_zgmem.py:332-598`）—— 测尚未迁移的 `zgmem.py`（模块 C/D）
+
+### 测试/CI 缺口（三轮 reviewer 记录）
+
+- [x] **测试发现兜底 + 入口覆盖**：CI 用 `--test-reporter=tap` 断言 `# pass ≥ 28`（node22 默认 TAP、
+      node24 默认 spec，不锁 reporter 会在 22 上失效）；`find **/*.ts` 递归 `--check` 覆盖入口 `index.ts`，
+      `import()` 仅对零依赖的 `lib/*.ts`（`index.ts` 依赖 peerDependency `typebox`，CI 无 `npm ci`）。
+- [x] **静态类型检查**：新增 `typecheck` CI job（独立 node22 job，不随 OS/node 矩阵翻倍）+
+      `tsconfig.json`（`strict`/`noEmit`/`allowImportingTsExtensions`）。CI 只装两个 devDependency
+      （`typescript` + `@types/node`，`npm i --legacy-peer-deps`，**不装 peerDependencies** —— pi 解包 400MB+），
+      peer 由 `types/peers.d.ts` 的环境声明桩住。本地 `tsc --noEmit -p tsconfig.json` 与 CI 一致，当前 0 错误。
+- [x] **真实 CLI 入口在 CI 执行**：新增 CI 步骤用已提交的 `tests/fixtures/etl/sessions` 起子进程直接跑
+      `etl.ts "$sessions/*.jsonl" "$corpus"`，断言分片落盘、manifest 生成（在 corpus 上一级）、摘要行输出。
+- [x] **黄金样本盲区**：补了 mtime 变而内容不变仍 `(+0 inc)`（`tests/etl.test.ts`，`canContinue` 只比 `prefix_sha`）、
+      非 ASCII sid 端到端（ETL 写分片名 + manifest 键 + `ensure_ascii=False`）、user/assistant 配对跨分片边界
+      （`tests/corpus.test.ts`，`readWindow` 的 needPrev/needNext 扩片）。
+- `tests/differential/etl_differential.ts` 是迁移期一次性证据，**故意不进 CI**；是否随模块 B 一并提交
+  由仓库决定（当前 untracked）。
+
+> **黄金样本盲区（未修，已知）**：`tests/etl.test.ts` 的黄金样本只对「Python 序列化出来的 manifest 文件」
+> 换成 `__SESSIONS_DIR__` 占位符后整字节比对，因此**只在 Python 写过那些键上生效**：若 TS 侧多写一个
+> schema 之外的键，黄金样本看不到。缓解：TS 侧 manifest 由 `CorpusManifest` 类型约束，且差分器阶段 3 的
+> `stableStringify` 逐键深比较（真实语料 1247 项对拍零差异）会抓到多/少键。
+
+### 类型检查的支撑条件（三轮 reviewer 变异验证）
+
+- **`types/peers.d.ts` 是关键支点**：CI 不装 peerDependencies，类型检查能过**完全依赖**它。变异验证：
+  删掉该文件后 `tsc` 报 `TS2307 Cannot find module 'typebox'` / `'@earendil-works/pi-coding-agent'`（exit 1）。
+  `index.ts:1-11` 的 6 个 peer import（`typebox`、`@sinclair/typebox`、`pi-coding-agent`、`pi-ai`、`pi-tui`、`pi-types`）
+  都由它桩住、无遗漏。因它是个无保护的普通文件，`ci.yml` 的 typecheck job 里加了 `test -f types/peers.d.ts` 兜底。
+- **依赖可复现性**：仓库不提交 `package-lock.json`（零运行时依赖），类型检查依赖的可复现性靠
+  `package.json` 里的**精确版本**（`typescript 5.6.3` / `@types/node 22.19.19`）保证。
+- 模块收集用 `while IFS= read -r` 循环而非 `mapfile`（后者需 bash 4+）：已在 macOS 默认 bash 3.2
+  下逐字复现通过，Runner（bash 5）无影响。
+
+### 明确不做的项
+
+- **L1 `index.ts` 功能覆盖**：*won't fix*。CI 里没有 pi runtime，功能性覆盖需 stub 整个 peer（成本高）。
+  已覆盖的层次：语法（`--check`）+ 类型（`tsc`）+ 生态里的真进程执行（`etl.ts` 子进程步骤）。
+- **L2 `shuf` 依赖**：全仓 `rg shuf`（`*.ts`/`*.py`/`*.yml`/`*.sh`，排除 `node_modules`）**零命中**，
+  差分脚本也无随机/`shuf` —— 该标签已过期，关闭。

@@ -2,11 +2,11 @@
  * lib/corpus.ts（模块 A）的单元测试。
  *
  * 用例名沿用 Python 侧 tests/test_zgmem.py 的原名，便于逐条核对（见 docs/plan-ts-migration.md）。
- * 尚未对等的两条需要模块 B/C 就位：
- *   - TestH1SeqAllocator.test_long_session_gets_all_fragments_into_manifest（依赖 ETL 写分片）
- *   - TestH2HitRefinement.test_refine_hit_line_end_to_end（依赖 ETL + CLI 精修路径）
- *   - TestIdempotent.test_frozen_prefix_is_stable_and_later_runs_stay_incremental（依赖 ETL）
- * 迁移完成前它们仍由 Python 侧负责，模块 B/C 落地时必须补上。
+ * 模块 A 原有欠账的两条已随模块 B 落地迁到 tests/etl.test.ts：
+ *   - TestH1SeqAllocator.test_long_session_gets_all_fragments_into_manifest
+ *   - TestIdempotent.test_frozen_prefix_is_stable_and_later_runs_stay_incremental
+ * 仍未迁移的只剩下面这条（属模块 C 的 CLI 精修路径），完成前由 Python 侧负责：
+ *   - TestH2HitRefinement.test_refine_hit_line_end_to_end
  */
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
@@ -119,6 +119,50 @@ test("TestRowContract.crlf_and_trailing_newline", () => {
   assert.deepEqual(rows.map((r) => r.text), ["a", "b"], "Python 通用换行：\\r\\n 算行界");
 });
 
+// ---------- 配对（跨分片）----------
+// 切分器有一条“切点不能落在 user 行上”的规则，所以正常切分不会把 user/assistant 拆到两片；
+// 唯一的例外是**单条 user 行自身就超过字节上限**（独占一片），回复落到下一片（对应 s-big 那种巨行）。
+// 这条路径只在 readWindow 的 needPrev/needNext 扩片时才会跑到，之前没有用例扫到。
+test("TestH2HitRefinement.pair_crosses_shard_boundary_both_directions", () => {
+  const dir = tmpdir();
+  const man = zc.emptyManifest();
+  // s.p0001.txt：只有一条 user，它的 assistant 回复在下一片
+  zc.writeSegment(dir, "s.p0001.txt", [{ jsonlLine: 1, role: "user", ts: 1700000000001, text: "跨片提问" }]);
+  zc.writeSegment(dir, "s.p0002.txt", [{ jsonlLine: 2, role: "assistant", ts: 1700000000002, text: "跨片回答" }]);
+  zc.segments(man)["s.p0001.txt"] = {
+    session_id: "s",
+    seq: 1,
+    rows: 1,
+    start_jsonl_line: 1,
+    start_corpus_line: 1,
+    start_ts: 1700000000001,
+    frozen: true,
+  };
+  zc.segments(man)["s.p0002.txt"] = {
+    session_id: "s",
+    seq: 2,
+    rows: 1,
+    start_jsonl_line: 2,
+    start_corpus_line: 2,
+    start_ts: 1700000000002,
+    frozen: false,
+  };
+
+  // 从 assistant 往回找 user（needPrev：扩到上一片）
+  const a = zc.pairForGlobal(dir, man, "s", 2);
+  assert.equal(a?.role, "assistant");
+  assert.equal(a?.user, "跨片提问");
+  assert.equal(a?.assistant, "跨片回答");
+  assert.equal(a?.ref.corpus_line, 2);
+
+  // 从 user 往右找 assistant（needNext：扩到下一片）
+  const u = zc.pairForGlobal(dir, man, "s", 1);
+  assert.equal(u?.role, "user");
+  assert.equal(u?.user, "跨片提问");
+  assert.equal(u?.assistant, "跨片回答");
+  assert.equal(u?.ref.corpus_line, 1);
+});
+
 // ---------- 切分 ----------
 test("TestSplitPoint.cuts_only_when_limits_exceeded", () => {
   const mk = (roles: string[]) =>
@@ -198,12 +242,14 @@ test("TestManifest.roundtrip_keeps_unicode_and_leaves_no_tmp", () => {
   const dir = tmpdir();
   const mpath = path.join(dir, "manifest.json");
   const man = zc.emptyManifest();
-  zc.sessions(man)["中文-会话"] = { first_ts: 1, last_ts: 2 };
+  zc.sessions(man)["中文-会话"] = { start_ts: 1, jsonl_size: 2 };
   zc.segments(man)["中文-会话.p0001.txt"] = {
     session_id: "中文-会话",
     seq: 1,
+    start_jsonl_line: 1,
     start_corpus_line: 1,
     rows: 2,
+    start_ts: 1,
     frozen: true,
   };
   zc.saveManifest(mpath, man);

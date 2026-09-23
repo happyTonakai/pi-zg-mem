@@ -49,7 +49,9 @@ jobs:
         # 与 py job 保持同样的 OS 矩阵：扩展实际跑在开发机（macOS）上，
         # 只测 Linux 会把 mtime 精度、文件名规范化这类差异漏掉。
         os: [ubuntu-latest, macos-latest]
-        node: ["24"]
+        # 22 = 迁移后的最低支持版本（类型擦除在 22.6 就有了，但 22 需要显式 --experimental-strip-types；
+        # 24 起默认开启，所以下面的命令统一显式带上这个 flag，两个版本行为一致）。
+        node: ["22", "24"]
     steps:
       - uses: actions/checkout@v4
 
@@ -62,17 +64,52 @@ jobs:
       # 所以 CI 不再把 Python 当裁判（见 docs/plan-ts-migration.md 回归策略第 1 层）。
       # 注意：tests/differential/ 是迁移期的一次性证据（需要 Python），故意不在这里跑。
       - name: Run TS regression suite
-        run: node --test
+        run: |
+          set -o pipefail
+          node --experimental-strip-types --test --test-reporter=tap | tee /tmp/ts-test.tap
+          # 发现即失败：用例文件被改名/移走时 node 会以 0 用例 exit 0，必须显式兜底。
+          # 当前 32 个；低于 28 直接红。（--test-reporter=tap 是必须的：node22 默认 TAP、
+          # node24 默认 spec，不锁 reporter 这个 grep 会在 22 上失效）
+          pass=$(grep -E '^# pass [0-9]+' /tmp/ts-test.tap | tail -1 | awk '{print $3}')
+          test "${pass:-0}" -ge 28
 
       # 把迁移计划里的两条硬约束变成 CI 断言，而不是靠人记得：
-      #   1. 只用可擦除语法 —— 每个模块都要能被 node 直接执行（无 enum/namespace/装饰器）
+      #   1. 只用可擦除语法 —— 每个模块都要能被 node 直接解析执行（无 enum/namespace/装饰器）
       #   2. 零运行时依赖 —— 只允许 node: 标准库
-      - name: Every module runs directly (erasable syntax only)
+      # 不用 `node "$f"` 直接跑：带 main guard 的 CLI 型模块（如 lib/etl.ts）裸跑会走
+      # 用法分支并以 2 退出（这是对的），会让断言误报。--check 管语法、import 管顶层可执行。
+      - name: Every module is erasable-syntax and importable
         run: |
-          for f in extensions/zg-memory/lib/*.ts; do
+          set -euo pipefail
+          # 递归收集所有 .ts（含入口 index.ts），别让新子目录成为盲区。
+          # 用 while-read 而不是 mapfile：mapfile 需要 bash 4+，这样在 macOS 默认的
+          # bash 3.2 下也能原样复现这条检查（Runner 上是 bash 5，无影响）。
+          files=()
+          while IFS= read -r f; do files+=("$f"); done < <(find extensions/zg-memory -name '*.ts' -not -path '*/node_modules/*' | sort)
+          test "${#files[@]}" -ge 3   # corpus.ts + etl.ts + index.ts
+          for f in "${files[@]}"; do
             echo "-> $f"
-            node "$f"
+            # --check 只解析语法、不解析 import，对 peerDependency 入口也安全
+            node --experimental-strip-types --check "$f"
           done
+          # import() 只对零依赖模块（lib/*）做顶层可执行验证；
+          # index.ts 依赖 pi/typebox，CI 没 npm ci，import 必然 MODULE_NOT_FOUND
+          for f in extensions/zg-memory/lib/*.ts; do
+            node --experimental-strip-types --input-type=module -e "await import('./$f')"
+          done
+
+      # 黄金样本走的是进程内 etlMain，真正的 CLI（import.meta.main 分支 + argv 解析）
+      # 在别处从不执行。这里用已提交的 ETL fixture 把真入口跑一遍。
+      - name: ETL CLI runs as a real process
+        run: |
+          set -euo pipefail
+          w=$(mktemp -d)
+          cp -R tests/fixtures/etl/sessions "$w/sessions"
+          out=$(node --experimental-strip-types extensions/zg-memory/lib/etl.ts "$w/sessions/*.jsonl" "$w/corpus")
+          echo "$out"
+          test -n "$(find "$w/corpus" -name '*.txt')"   # 分片已生成
+          test -f "$w/manifest.json"                    # manifest 在 corpus 的上一级
+          echo "$out" | grep -qE '[0-9]+ 个 session'     # 真入口走到了摘要输出
 
       - name: No runtime dependencies
         run: |
@@ -89,6 +126,34 @@ jobs:
             }
             console.log("OK: 无运行时依赖（peerDependencies 由 pi 运行时提供）");
           '
+
+  # 类型检查单独一个 job，不随 OS/node 矩阵翻了四遍（依赖下载不必重复）。
+  # 严格模式（strict）过了整个 extensions/** + tests/**；本地 `tsc -p tsconfig.json` 与这里一致。
+  typecheck:
+    name: Typecheck (tsc --noEmit, strict)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      # 只装类型检查需要的两个 devDependency。**不装 peerDependencies** ——
+      # @earendil-works/pi-coding-agent 解包 400MB+，而本仓库的原则是零运行时依赖；
+      # 这两个 peer 由 types/peers.d.ts 里的环境声明桩住，与本地检查行为一致。
+      # 仓库不提交 package-lock.json（零运行时依赖），可复现性靠 package.json 里的**精确版本**保证。
+      # tsc 只做类型检查（tsconfig 里 noEmit），不产出任何构建产物。
+      - name: Install typecheck deps
+        run: npm i --no-audit --no-fund --no-package-lock --legacy-peer-deps
+
+      # types/peers.d.ts 是「不装 peer 还能过类型检查」的唯一支点（变异验证：删掉它 → TS2307 ×2）。
+      # 它是个无保护的普通文件，这里显式钉一下，免得哪天被顺手删掉后 typecheck 静默变成空转。
+      - name: Guard the peer type stubs
+        run: test -f types/peers.d.ts
+
+      - name: tsc --noEmit
+        run: npx tsc --noEmit -p tsconfig.json
 
   pipeline:
     name: ETL → refresh pipeline (no index engine)
