@@ -59,7 +59,8 @@ Python 在**全部门类通过验收前不删**。`index.ts` 按命令逐条切�
    （`unittest` → `node:test`）。**用例数只许多不许少**，迁移时必须能对齐清单。
 3. **差分对拍（迁移期一次性证据，完成即弃）**
    对同一批输入分别跑 Python 与 TS，比对产物字节级一致；并在**真实语料**上跑
-   （`~/.pi/agent/zgmem/`，当前 33 文件 / 308531 字节）。
+   （`~/.pi/agent/zgmem/`，当前 7 workspace / 244 个 `.txt` 分片 —— 该目录随会话增长，
+   数字只是对拍当天的快照）。
    最后再做一次真 `zg` 端到端冒烟。
 
 现有 25 个用例的归属（迁移时按此对齐）：
@@ -122,14 +123,16 @@ Node **没有**原生 flock，macOS 也没有 `flock(1)` 命令（那是 util-li
 
 ## 迁移进度
 
-### 模块 A `lib/corpus.ts` — 完成（2026-09-22）
+### 模块 A `lib/corpus.ts` — 完成（2026-09-22，提交 `3a06538`）
 
 验收对照：
 
-- [x] `node --test` 全绿：18 个用例（`tests/corpus.test.ts` 15 + `tests/corpus_golden.test.ts` 3）
+- [x] `node --test` 全绿：18 个用例（`tests/corpus.test.ts` 15 + `tests/corpus_golden.test.ts` 3）；
+      后经三轮 reviewer 补入跨分片配对用例，现为 19（`tests/corpus.test.ts` 16）
 - [x] Python 用例对等：`TestH1SeqAllocator`(2/3)、`TestH2HitRefinement`(3/4) 已按原名迁移；
-      剩余 3 条依赖模块 B/C（`test_long_session_gets_all_fragments_into_manifest`、
-      `test_refine_hit_line_end_to_end`、`TestIdempotent`），在 B/C 落地时必须补
+      当时剩余 3 条依赖模块 B/C（`test_long_session_gets_all_fragments_into_manifest`、
+      `test_refine_hit_line_end_to_end`、`TestIdempotent`）—— 其中前两条与 `TestIdempotent`
+      已在模块 B 落地时补齐，`test_refine_hit_line_end_to_end` 仍待模块 C
 - [x] 产物逐字节一致：`tests/fixtures/` 黄金样本（分片 + manifest，覆盖 CJK/制表符/emoji/
       含换行文本/5 位 seq/带点 sid/非 ASCII sid）
 - [x] 真实语料差分：**7 workspace / 241 分片 / 8267 行，与 Python 零差异**
@@ -164,11 +167,11 @@ CI：新增 `ts-tests` job（**node 22 + 24 × ubuntu + macOS**，零依赖、�
   `import('./lib/x.ts')`（顶层可执行）。原来直接 `node "$f"` 对带 main guard 的 CLI 型模块
   （`lib/etl.ts`）会走用法分支 `exit 2`，那是**正确行为**却会让断言误报
 
-### 模块 B `lib/etl.ts` — 完成（2026-09-23）
+### 模块 B `lib/etl.ts` — 完成（2026-09-23，提交 `23370f6`；配套 CI/类型检查见 `640c2d5`）
 
 验收对照：
 
-- [x] `node --test` 全绿：30 个用例（A 的 18 + B 的 12，`tests/etl.test.ts`），不依赖 Python
+- [x] `node --test` 全绿：32 个用例（A 的 19 + B 的 13，`tests/etl.test.ts`），不依赖 Python
 - [x] Python 用例对等：`TestH1EtlFailureIsVisible`(1)、`TestH3MigrateCleanup`(5)、
       `TestM1TailConsistency`(2)、`TestIdempotent`(1) 已按原名迁移；并补上了 A 的欠账
       `test_long_session_gets_all_fragments_into_manifest`、`test_frozen_prefix_is_stable_and_later_runs_stay_incremental`
@@ -233,7 +236,7 @@ manifest 的 `segments` 是普通对象，键的插入顺序在“重建”与�
 - [x] `TestH1EtlFailureIsVisible` / `TestH3MigrateCleanup` / `TestM1TailConsistency` / `TestIdempotent`
       → `tests/etl.test.ts`
 - [ ] `TestH2HitRefinement.test_refine_hit_line_end_to_end` —— 依赖尚未迁移的 CLI 精修路径（模块 C）
-- [ ] `TestM2IndexRefresh.*`（11 条，`test_zgmem.py:332-598`）—— 测尚未迁移的 `zgmem.py`（模块 C/D）
+- [ ] `TestM2IndexRefresh.*`（9 条，`test_zgmem.py:332-598`）—— 测尚未迁移的 `zgmem.py`（模块 C/D）
 
 ### 测试/CI 缺口（三轮 reviewer 记录）
 
@@ -249,8 +252,8 @@ manifest 的 `segments` 是普通对象，键的插入顺序在“重建”与�
 - [x] **黄金样本盲区**：补了 mtime 变而内容不变仍 `(+0 inc)`（`tests/etl.test.ts`，`canContinue` 只比 `prefix_sha`）、
       非 ASCII sid 端到端（ETL 写分片名 + manifest 键 + `ensure_ascii=False`）、user/assistant 配对跨分片边界
       （`tests/corpus.test.ts`，`readWindow` 的 needPrev/needNext 扩片）。
-- `tests/differential/etl_differential.ts` 是迁移期一次性证据，**故意不进 CI**；是否随模块 B 一并提交
-  由仓库决定（当前 untracked）。
+- `tests/differential/etl_differential.ts` 是迁移期一次性证据，**故意不进 CI**（需要 Python 当裁判）；
+  已随模块 B 提交进仓库（`23370f6`），待模块 G 删 Python 时一并删除。
 
 > **黄金样本盲区（未修，已知）**：`tests/etl.test.ts` 的黄金样本只对「Python 序列化出来的 manifest 文件」
 > 换成 `__SESSIONS_DIR__` 占位符后整字节比对，因此**只在 Python 写过那些键上生效**：若 TS 侧多写一个

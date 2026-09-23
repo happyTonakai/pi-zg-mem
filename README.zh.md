@@ -93,10 +93,11 @@ pi list          # 确认已注册
 **验证是否正常**
 
 ```bash
-python3 extensions/zg-memory/tests/test_zgmem.py     # 25 个离线用例，不联网、不需要 zg
+python3 extensions/zg-memory/tests/test_zgmem.py     # 25 个离线 Python 用例，不联网、不需要 zg
+node --experimental-strip-types --test                # 32 个 TypeScript 用例，约束相同
 ```
 
-这套用例就是 [CI](.github/workflows/ci.yml) 跑的东西——Python 3.9 / 3.11 / 3.13，Ubuntu 与 macOS 双平台，除标准库外什么都没装。CI 另外还端到端跑一遍真实入口（ETL → 无变化 refresh → 增量 refresh），免得这条管线悄悄坏掉。
+[CI](.github/workflows/ci.yml) 跑：Python 套件（3.9 / 3.11 / 3.13，Ubuntu 与 macOS 双平台）、TypeScript 套件（Node 22 / 24，双平台）、一个 `tsc --noEmit` 类型检查，以及一个端到端跑真实入口的 pipeline job（ETL → 无变化 refresh → 增量 refresh），免得管线悄悄坏掉。
 
 ## 使用
 
@@ -194,7 +195,9 @@ python3 $Z refresh --sessions-dir <dir>           # 增量刷新
 
 ## 现状、边界与后续
 
-**已完成并验证：** ETL、混合 + 精确召回、回指深钻、增量维护、extension 工具暴露。25 个离线用例（`python3 extensions/zg-memory/tests/test_zgmem.py`），外加真机 `zg` 端到端冒烟。当前设计经过两轮独立评审，结论与修复记录在 [`docs/reviews/`](docs/reviews/)。
+**已完成并验证：** ETL、混合 + 精确召回、回指深钻、增量维护、extension 工具暴露。25 个离线 Python 用例（`python3 extensions/zg-memory/tests/test_zgmem.py`）加 32 个 TypeScript 用例，外加真机 `zg` 端到端冒烟。Python 设计经过独立评审（[`docs/reviews/`](docs/reviews/)），TypeScript 迁移过程中又做了三轮 reviewer，两批结论与修复均有记录，后者在 [`docs/plan-ts-migration.md`](docs/plan-ts-migration.md)。
+
+**迁移进行中。** 运行时正在从 Python 逐模块迁到 TypeScript，每一步都有与 Python 实现逐字节对拍的证据。语料层与 ETL 层已迁移完（`extensions/zg-memory/lib/`）；召回层仍是 Python，因此**pi 扩展目前依然靠 `python3` 子进程**，`python3` 在它落地前仍是硬依赖。计划、逐模块证据与未迁移用例清单见 [`docs/plan-ts-migration.md`](docs/plan-ts-migration.md)。
 
 **已知边界**
 
@@ -214,24 +217,30 @@ extensions/zg-memory/
   jsonl2corpus.py    ETL：会话 JSONL → 分片可检索语料（含 manifest、原子写、文件锁）
   zgmem_corpus.py    分片 / 配对共享库（被上面两个脚本 import）
   zgmem.py           召回与回指 CLI（query / show / ctx / sessions / refresh）
-  tests/             25 个离线用例
+  lib/corpus.ts      `zgmem_corpus.py` 的 TypeScript 移植（迁移模块 A — 已完成）
+  lib/etl.ts         `jsonl2corpus.py` 的 TypeScript 移植（迁移模块 B — 已完成）
+  tests/             Python 套件（25 个离线用例）
   README.md          设计与语料格式深入说明
+tests/               TypeScript 侧：*.test.ts、黄金样本、差分对拍脚本
+types/peers.d.ts     pi peer 依赖的环境声明桩（让 tsc 无需安装它们）
+docs/plan-ts-migration.md   Python → TypeScript 迁移计划 + 逐模块证据
 docs/reviews/        独立评审记录
 ```
 
 ## 开发
 
-运行时不需要 npm 依赖（pi 自带 `typebox` / `pi-coding-agent`）。只有 `tsc` 类型检查需要它们：
+运行时不需要 npm 依赖——TypeScript 侧只用 `node:` 内置模块。只有类型检查需要 `devDependencies`（精确锁版）：
 
 ```bash
-mkdir -p extensions/zg-memory/node_modules
-ln -s "$(dirname "$(readlink -f "$(command -v pi)")")/../lib/node_modules/@earendil-works" \
-      extensions/zg-memory/node_modules/@earendil-works
-ln -s ../../@earendil-works/pi-coding-agent/node_modules/typebox \
-      extensions/zg-memory/node_modules/typebox
+# --legacy-peer-deps: pi 的 peer 依赖由 types/peers.d.ts 桩住，不必安装
+# （`pi-coding-agent` 解包 400MB+，tsc 和测试都用不到）
+npm i --no-package-lock --legacy-peer-deps
+npx tsc --noEmit -p tsconfig.json        # 与 CI 相同的严格配置
+node --experimental-strip-types --test   # 32 个用例：不需要 zg、不联网、不需要 Python
 ```
 
-Python 侧除标准库外无依赖，直接跑即可：
+`types/peers.d.ts` 把 pi 的 peer 依赖声明成环境模块，因此不再需要从全局 `pi` 安装里软链
+`node_modules` 了。Python 侧除标准库外无依赖，直接跑即可：
 
 ```bash
 python3 extensions/zg-memory/zgmem.py --help

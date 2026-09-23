@@ -93,10 +93,11 @@ Then `/reload` (or restart pi). From a local clone, `pi install /absolute/path/t
 **Verify it works**
 
 ```bash
-python3 extensions/zg-memory/tests/test_zgmem.py     # 25 offline tests, no network, no zg needed
+python3 extensions/zg-memory/tests/test_zgmem.py     # 25 offline Python tests, no network, no zg needed
+node --experimental-strip-types --test                # 32 TypeScript tests, same constraints
 ```
 
-That suite is what [CI](.github/workflows/ci.yml) runs — Python 3.9 / 3.11 / 3.13, on both Ubuntu and macOS, with nothing installed beyond the stdlib. CI also drives the real entry points end-to-end (ETL → no-op refresh → incremental refresh) so the pipeline can't silently rot.
+[CI](.github/workflows/ci.yml) runs the Python suite on Python 3.9 / 3.11 / 3.13 across Ubuntu and macOS, the TypeScript suite on Node 22 / 24 across both, a `tsc --noEmit` typecheck, and a pipeline job that drives the real entry points end-to-end (ETL → no-op refresh → incremental refresh) so nothing can silently rot.
 
 ## Usage
 
@@ -194,7 +195,9 @@ This indexes **all of your session history** — including thinking blocks and t
 
 ## Status, limits, roadmap
 
-**Working and tested:** the ETL, hybrid + exact recall, drill-down, incremental maintenance, the extension surface. 25 offline tests (`python3 extensions/zg-memory/tests/test_zgmem.py`), plus a real-`zg` end-to-end smoke test. The current design went through two rounds of independent review; findings and fixes are in [`docs/reviews/`](docs/reviews/).
+**Working and tested:** the ETL, hybrid + exact recall, drill-down, incremental maintenance, the extension surface. 25 offline Python tests (`python3 extensions/zg-memory/tests/test_zgmem.py`) plus 32 TypeScript tests, and a real-`zg` end-to-end smoke test. The Python design went through independent review ([`docs/reviews/`](docs/reviews/)), and the TypeScript migration added three reviewer rounds on top; both sets of findings and fixes are recorded, the latter in [`docs/plan-ts-migration.md`](docs/plan-ts-migration.md).
+
+**Migration in progress.** The runtime is moving from Python to TypeScript, one module at a time, each step with byte-for-byte differential evidence against the Python implementation. The corpus and ETL layers are already ported (`extensions/zg-memory/lib/`); the recall layer is still Python, so **the extension still shells out to `python3` today** and `python3` remains a hard requirement until that lands. Plan, per-module evidence and the list of not-yet-migrated test cases: [`docs/plan-ts-migration.md`](docs/plan-ts-migration.md).
 
 **Known limits**
 
@@ -214,24 +217,30 @@ extensions/zg-memory/
   jsonl2corpus.py    ETL: session JSONL → sharded, searchable corpus (+ manifest, atomic writes, locking)
   zgmem_corpus.py    sharding / pair-matching shared library (imported by both)
   zgmem.py           recall + drill-down CLI (query / show / ctx / sessions / refresh)
-  tests/             25 offline tests
+  lib/corpus.ts      TypeScript port of zgmem_corpus.py  (migration module A — done)
+  lib/etl.ts         TypeScript port of jsonl2corpus.py  (migration module B — done)
+  tests/             Python suite (25 offline tests)
   README.md          design + corpus format deep dive
+tests/               TypeScript port: *.test.ts, golden fixtures, differential harnesses
+types/peers.d.ts     ambient stubs for the pi peer deps, so tsc runs without installing them
+docs/plan-ts-migration.md   Python → TypeScript plan + per-module evidence
 docs/reviews/        independent review records
 ```
 
 ## Development
 
-No runtime npm dependencies (pi provides `typebox` / `pi-coding-agent`). Only `tsc` type-checking needs them:
+No runtime npm dependencies — the TypeScript code uses only `node:` builtins. Only the type-check needs `devDependencies`, pinned to exact versions:
 
 ```bash
-mkdir -p extensions/zg-memory/node_modules
-ln -s "$(dirname "$(readlink -f "$(command -v pi)")")/../lib/node_modules/@earendil-works" \
-      extensions/zg-memory/node_modules/@earendil-works
-ln -s ../../@earendil-works/pi-coding-agent/node_modules/typebox \
-      extensions/zg-memory/node_modules/typebox
+# --legacy-peer-deps: the pi peers are stubbed by types/peers.d.ts, so don't fetch them
+# (unpacking pi-coding-agent is 400 MB+ and is not needed for tsc or the tests)
+npm i --no-package-lock --legacy-peer-deps
+npx tsc --noEmit -p tsconfig.json        # same strict config CI runs
+node --experimental-strip-types --test   # 32 tests: no zg, no network, no Python
 ```
 
-The Python side needs nothing but the standard library — run it directly:
+`types/peers.d.ts` declares the pi peer dependencies as ambient modules, which is why nothing
+has to be symlinked out of your global `pi` install any more. The Python side needs nothing but the standard library — run it directly:
 
 ```bash
 python3 extensions/zg-memory/zgmem.py --help

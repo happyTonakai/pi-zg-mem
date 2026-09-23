@@ -39,6 +39,12 @@ zg_memory_open   ←——  回指 JSONL 深钻（thinking / 工具调用 / 扩�
 | `index.ts` | pi extension：注册 2 个工具 + 1 个命令 + 生命周期钩子 |
 | `jsonl2corpus.py` | ETL：JSONL → 干净语料**分片**（一行一条消息 `行号\t角色\t时间\t文本`），维护 `manifest.json` v2（corpus 分片 ↔ JSONL 映射、前缀哈希/offset 变更检测、分片元数据）；原子写 + 文件锁 + 单实例（flock） |
 | `zgmem.py` | 检索与回指：`query / show / ctx / sessions / refresh` |
+| `zgmem_corpus.py` | 分片 / 配对共享库（被 ETL 与 CLI 同时 import） |
+| `lib/corpus.ts` | `zgmem_corpus.py` 的 TypeScript 移植（迁移模块 A，已完成；产物逐字节对拍零差异） |
+| `lib/etl.ts` | `jsonl2corpus.py` 的 TypeScript 移植（迁移模块 B，已完成；差分对拍零差异） |
+
+> 两个 `lib/*.ts` **目前尚未接入运行时** —— `index.ts` 依然走 `python3` 子进程，要到迁移模块 F
+> 才切到进程内导入。计划与逐模块证据见 [docs/plan-ts-migration.md](../../docs/plan-ts-migration.md)。
 
 ## 给 agent 的工具
 
@@ -160,6 +166,8 @@ python3 $Z refresh --sessions-dir <dir>         # 增量刷新
 
 **有意不做 / 待办**：
 - **只做主动召回**（被动捕获/自动摘要沉淀）明确为下一步，本版不含。
+- **Python → TypeScript 迁移进行中**：语料层（模块 A）与 ETL 层（模块 B）已移植完并有逐字节差分证据，
+  其余（query / refresh / CLI / 入口切换）未迁，因此 `python3` 仍是运行时硬依赖。
 - **fragment 级向量复用**（只嵌新增行、复用已冻结片的向量）需要改上游 `zg` 的索引格式，
   暂不做；当前用"分片 + 尾片"近似达到"每轮成本有界"（方案 A）。
 - workspace 已按会话目录派生（全局可用）；跨 workspace 检索只覆盖已初始化过的项目，
