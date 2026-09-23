@@ -1,0 +1,172 @@
+{
+  "_comment": "由 generate_corpus_fixtures.py 生成；改 Python 实现后要重新生成并逐字节 review diff",
+  "files": [
+    {
+      "fname": "sess-a.p0001.txt",
+      "start_ts": 1700000000000,
+      "rows": [
+        {
+          "jsonlLine": 1,
+          "role": "user",
+          "ts": 1700000000001,
+          "text": "普通内容 filler"
+        },
+        {
+          "jsonlLine": 2,
+          "role": "assistant",
+          "ts": 1700000000002,
+          "text": "第二个 回复"
+        }
+      ]
+    },
+    {
+      "fname": "sess-a.p0002.txt",
+      "start_ts": 1700000010000,
+      "rows": [
+        {
+          "jsonlLine": 3,
+          "role": "user",
+          "ts": 1700000000003,
+          "text": "含\t制表符 的文本"
+        },
+        {
+          "jsonlLine": 4,
+          "role": "toolResult",
+          "ts": 1700000000004,
+          "text": ""
+        }
+      ]
+    },
+    {
+      "fname": "sess-a.p10000.txt",
+      "start_ts": 1700000020000,
+      "rows": [
+        {
+          "jsonlLine": 5,
+          "role": "user",
+          "ts": 1700000000005,
+          "text": "第 10000 片，验证 5 位 seq"
+        }
+      ]
+    },
+    {
+      "fname": "sess-b.p0001.txt",
+      "start_ts": 1700000030000,
+      "rows": [
+        {
+          "jsonlLine": 1,
+          "role": "user",
+          "ts": 1700000000006,
+          "text": "带换行的\n文本 会被拆成两行"
+        },
+        {
+          "jsonlLine": 2,
+          "role": "assistant",
+          "ts": 1700000000007,
+          "text": "emoji 🙂 和 中文"
+        }
+      ]
+    },
+    {
+      "fname": "a.b.p0007.txt",
+      "start_ts": 1700000040000,
+      "rows": [
+        {
+          "jsonlLine": 1,
+          "role": "user",
+          "ts": 1700000000008,
+          "text": "sid 里带点"
+        }
+      ]
+    },
+    {
+      "fname": "中文-会话.p0001.txt",
+      "start_ts": 1700000050000,
+      "rows": [
+        {
+          "jsonlLine": 1,
+          "role": "user",
+          "ts": 1700000000009,
+          "text": "非 ASCII sid，测 manifest 的 ensure_ascii=False"
+        }
+      ]
+    }
+  ],
+  "manifest": {
+    "version": 2,
+    "sessions": {
+      "sess-a": {
+        "first_ts": 1700000000001,
+        "last_ts": 1700000000005
+      },
+      "sess-b": {
+        "first_ts": 1700000000006,
+        "last_ts": 1700000000007
+      },
+      "a.b": {
+        "first_ts": 1700000000008,
+        "last_ts": 1700000000008
+      },
+      "中文-会话": {
+        "first_ts": 1700000000009,
+        "last_ts": 1700000000009
+      }
+    },
+    "segments": {
+      "sess-a.p0001.txt": {
+        "session_id": "sess-a",
+        "seq": 1,
+        "start_corpus_line": 1,
+        "rows": 2,
+        "frozen": true,
+        "start_ts": 1700000000000,
+        "end_ts": 1700000000002
+      },
+      "sess-a.p0002.txt": {
+        "session_id": "sess-a",
+        "seq": 2,
+        "start_corpus_line": 3,
+        "rows": 2,
+        "frozen": true,
+        "start_ts": 1700000010000,
+        "end_ts": 1700000000004
+      },
+      "sess-a.p10000.txt": {
+        "session_id": "sess-a",
+        "seq": 10000,
+        "start_corpus_line": 5,
+        "rows": 1,
+        "frozen": true,
+        "start_ts": 1700000020000,
+        "end_ts": 1700000000005
+      },
+      "sess-b.p0001.txt": {
+        "session_id": "sess-b",
+        "seq": 1,
+        "start_corpus_line": 1,
+        "rows": 2,
+        "frozen": true,
+        "start_ts": 1700000030000,
+        "end_ts": 1700000000007
+      },
+      "a.b.p0007.txt": {
+        "session_id": "a.b",
+        "seq": 7,
+        "start_corpus_line": 1,
+        "rows": 1,
+        "frozen": true,
+        "start_ts": 1700000040000,
+        "end_ts": 1700000000008
+      },
+      "中文-会话.p0001.txt": {
+        "session_id": "中文-会话",
+        "seq": 1,
+        "start_corpus_line": 1,
+        "rows": 1,
+        "frozen": false,
+        "start_ts": 1700000050000,
+        "end_ts": 1700000000009
+      }
+    }
+  }
+}

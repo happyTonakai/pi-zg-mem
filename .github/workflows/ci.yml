@@ -40,6 +40,56 @@ jobs:
       - name: Every script still compiles
         run: python3 -m py_compile extensions/zg-memory/*.py extensions/zg-memory/tests/*.py
 
+  ts-tests:
+    name: tests · node${{ matrix.node }} · ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # 与 py job 保持同样的 OS 矩阵：扩展实际跑在开发机（macOS）上，
+        # 只测 Linux 会把 mtime 精度、文件名规范化这类差异漏掉。
+        os: [ubuntu-latest, macos-latest]
+        node: ["24"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      # TS 侧回归：单元用例 + 黄金样本逐字节比对。零运行时依赖，不需要 npm ci。
+      # 也不需要 Python —— 黄金样本已由 tests/fixtures/generate_corpus_fixtures.py 生成并提交，
+      # 所以 CI 不再把 Python 当裁判（见 docs/plan-ts-migration.md 回归策略第 1 层）。
+      # 注意：tests/differential/ 是迁移期的一次性证据（需要 Python），故意不在这里跑。
+      - name: Run TS regression suite
+        run: node --test
+
+      # 把迁移计划里的两条硬约束变成 CI 断言，而不是靠人记得：
+      #   1. 只用可擦除语法 —— 每个模块都要能被 node 直接执行（无 enum/namespace/装饰器）
+      #   2. 零运行时依赖 —— 只允许 node: 标准库
+      - name: Every module runs directly (erasable syntax only)
+        run: |
+          for f in extensions/zg-memory/lib/*.ts; do
+            echo "-> $f"
+            node "$f"
+          done
+
+      - name: No runtime dependencies
+        run: |
+          node -e '
+            const files = ["./package.json", "./extensions/zg-memory/package.json"];
+            const bad = [];
+            for (const f of files) {
+              const deps = Object.keys(require(f).dependencies || {});
+              if (deps.length) bad.push(`${f}: ${deps.join(", ")}`);
+            }
+            if (bad.length) {
+              console.error("禁止新增运行时依赖: " + bad.join(" | "));
+              process.exit(1);
+            }
+            console.log("OK: 无运行时依赖（peerDependencies 由 pi 运行时提供）");
+          '
+
   pipeline:
     name: ETL → refresh pipeline (no index engine)
     runs-on: ubuntu-latest

@@ -1,0 +1,1 @@
+1	user	1700000000009	非 ASCII sid，测 manifest 的 ensure_ascii=False
