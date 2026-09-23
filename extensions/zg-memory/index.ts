@@ -109,14 +109,17 @@ function liveAbort(): AbortController {
 
 /**
  * 跑 lib/ 下的 TS 入口(模块 F): 执行体由 `python3 <script>` 换成 `node <script>.ts`,
- * 仍是**子进程**而不是进程内直调 —— lib 是同步实现(15 处 spawnSync, 忠于 Python 的
- * subprocess.run), 进程内直调会占住 pi 的 event loop 冻住 TUI; 子进程同时提供
- * 崩溃隔离与可杀(session_shutdown 能中止)。理由与实测见 docs/plan-ts-migration.md 模块 F。
+ * 仍是**子进程**而不是进程内直调 —— lib 是同步实现(3 处 spawnSync: lib/query.ts 的 rg/zg 各一、
+ * lib/refresh.ts 的 zg, 忠于 Python 的 subprocess.run), 进程内直调会占住 pi 的 event loop 冻住 TUI;
+ * 子进程同时提供崩溃隔离与可杀(session_shutdown 能中止)。理由与实测见 docs/plan-ts-migration.md 模块 F。
  */
 function runLib(script: string, args: string[], timeoutMs = 120_000, extraSignal?: AbortSignal): Promise<string> {
   const signal = extraSignal ? AbortSignal.any([liveAbort().signal, extraSignal]) : liveAbort().signal;
   return execFileAsync(process.execPath, [STRIP_TYPES, script, ...args], {
-    maxBuffer: 16 * 1024 * 1024,
+    // 与 lib/corpus.ts 的 subprocessMaxBuffer() 默认值(256 MiB)保持一致: 默认才 1 MiB,
+    // 大 workspace 的 `show --full` / 话多的 zg index 会撞上。index.ts 不 import lib
+    // (边界约定), 所以这里只能用同一个字面量, 改动时要两边一起改。
+    maxBuffer: 256 * 1024 * 1024,
     timeout: timeoutMs,
     signal,
   }).then((r) => r.stdout);
@@ -126,7 +129,8 @@ async function zgIndex(cwd: string, rebuild = false): Promise<void> {
   const args = ["index", "."];
   if (rebuild) args.push("--rebuild");
   args.push("--embedding", EMBEDDING);
-  await execFileAsync("zg", args, { cwd, timeout: 300_000, maxBuffer: 16 * 1024 * 1024, signal: liveAbort().signal });
+  // 同上: 与 lib/refresh.ts:runIndex 的 spawnSync 上限保持一致(都是 subprocessMaxBuffer() 的默认值)。
+  await execFileAsync("zg", args, { cwd, timeout: 300_000, maxBuffer: 256 * 1024 * 1024, signal: liveAbort().signal });
 }
 
 function currentSessionFile(): string | undefined {

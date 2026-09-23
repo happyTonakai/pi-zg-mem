@@ -216,6 +216,9 @@ function queryEnv(home: string, ws: string): q.QueryEnv {
  */
 test("rgCandidates.raises_on_maxbuffer_instead_of_silently_returning_nothing", () => {
   const { scopeA } = buildFixture();
+  // 先钉住默认值本身：环境变量没设时必须远大于 Node 的 1 MiB 默认，
+  // 否则“把默认改回 1 MiB”这个测试仍会绿（下面只验证“超限要抛”）。
+  assert.ok(zc.subprocessMaxBuffer() > 1024 * 1024, `默认上限 ${zc.subprocessMaxBuffer()} 应 > 1 MiB`);
   const baseline = q.rgCandidates(scopeA, { query: MARKER }, 5, "ws-a");
   assert.ok(baseline.length > 0, "前置：这个 fixture 本来能命中，否则“返回空”也能骗过断言");
 

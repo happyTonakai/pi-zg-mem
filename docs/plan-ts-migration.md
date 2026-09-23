@@ -348,6 +348,14 @@ README 里 `python3` 的残留（含「需要 `python3` 在 PATH 上」这条前
   **0 差异**就是证据；要忠实复刻还得把“Python 因 Infinity 整个 session 失败”这个本身就别扭的行为
   一并搬过来，代价大于收益。**若哪天上游真的产生这类行，此处是第一个要动的地方。**
 
+- **rg 子进程非零退出时会丢掉全部候选**：`lib/query.ts:rgCandidates` 在 `proc.status !== 0` 时直接
+  `return []`（只 `proc.error` 例外，即 ENOBUFS/ENOENT 这类真正的启动失败）—— 所以某个 `jsonl_path`
+  仍在 manifest 里但文件被删时，`rg` 退 2，整个 workspace 的候选变空，而输出仍是“没有命中相关记忆”。
+  与 `zgmem.py:350` 逐字一致，改它就破了逐字节对拍（要改得连 Python 一起改）。
+- **`--workspace all` 扇出时静默丢失败 workspace**：`lib/query.ts` 里某个 workspace 的 `zg` 非零退出
+  被 `continue` 跳过，它的 stderr 不进结果，于是“某个 workspace 坏了”与“它没命中”在输出上不可分。
+  同样忠于 Python。
+
 ### 未迁移的 Python 用例（清单，避免被当成已迁移）
 
 `extensions/zg-memory/tests/test_zgmem.py` 的用例按模块登记迁移状态：

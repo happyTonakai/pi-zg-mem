@@ -464,9 +464,12 @@ export function rgCandidates(
     encoding: "utf8",
     maxBuffer: zc.subprocessMaxBuffer(),
   });
-  // 为什么不先 return []：rg 输出超限时 spawnSync 给的是 error=…MAXBUFFER + status=null，
-  // 当成“没命中”就变成了静默错答案（真机全量 rg 早就过 1 MiB 了）。
-  if (proc.error) throw proc.error;
+  // 为什么不先 return []：rg 输出超限时 spawnSync 给的是 error=…MAXBUFFER（message 里带 ENOBUFS）
+  // + status=null，当成“没命中”就变成了静默错答案（真机全量 rg 早就过 1 MiB 了）。
+  // 包一层只为可读：裸抛 proc.error 在 CLI 侧就是一句 `spawnSync rg ENOBUFS`；cause 保留原始 error。
+  if (proc.error) {
+    throw new Error(`rg 子进程失败（输出超过 maxBuffer？）: ${proc.error.message}`, { cause: proc.error });
+  }
   if ((proc.status ?? -1) !== 0) return [];
 
   const j2s = new Map<string, string>();
