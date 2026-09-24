@@ -1,5 +1,5 @@
 {
-  "_comment": "由 generate_corpus_fixtures.py 生成；改 Python 实现后要重新生成并逐字节 review diff",
+  "_comment": "冻结的黄金样本；生成器 generate_corpus_fixtures.py 已随模块 G 删除，改样本必须逐字节 review diff",
   "files": [
     {
       "fname": "sess-a.p0001.txt",

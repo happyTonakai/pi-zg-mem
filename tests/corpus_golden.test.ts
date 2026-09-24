@@ -1,8 +1,9 @@
 /**
- * 黄金样本回归：TS 必须逐字节复现 Python 生成的产物。
+ * 黄金样本回归：TS 必须逐字节复现这些产物。
  *
- * 样本由 tests/fixtures/generate_corpus_fixtures.py 用 Python 实现生成并提交，
- * 所以这个测试在 CI 里**不需要 Python**（回归策略第 1 层，见 docs/plan-ts-migration.md）。
+ * 样本是迁移期用 Python 实现生成后**冻结**提交的（生成器 `generate_corpus_fixtures.py`
+ * 已随模块 G 删除），所以这个测试在 CI 里**不需要 Python**（回归策略第 1 层，见 docs/plan-ts-migration.md）。
+ * 要改样本就得先手工重算期望字节，并逐字节 review diff。
  *
  * 覆盖：分片文件字节（含 CJK/制表符/emoji/换行/5 位 seq/带点 sid/非 ASCII sid）、
  *      manifest JSON 字节（含 ensure_ascii=False）、mtime 钉法、以及写后读回。

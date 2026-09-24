@@ -30,7 +30,7 @@
 
 ## 模块划分与顺序
 
-按依赖关系（不是按文件大小）排序。当前 Python 代码 2156 行，TS `index.ts` 365 行。
+按依赖关系（不是按文件大小）排序。迁移前的 Python 代码 2156 行，TS `index.ts` 365 行；G 之后 Python 已归零。
 
 | 步 | 目标文件 | 来源 | 行数 | 为什么这个顺序 |
 |---|---|---|---|---|
@@ -40,33 +40,38 @@
 | D | `lib/refresh.ts` | `zgmem.py`（刷新侧） | ~ | 写入路径：ETL + zg index + 索引戳/重试 |
 | E | `lib/cli.ts` | `zgmem.py`（入口） | ~ | 独立 CLI：`node lib/cli.ts <cmd>`，保留现有命令行 UX |
 | F | `index.ts` | 改造 | 365 | 子进程执行体 `python3 <script>` → `node lib/*.ts`（**不是**进程内导入，理由见模块 F 小节） |
-| G | 清理 | — | — | 删 Python、改 CI、改 README/docs |
+| G | 清理 ✅ | — | — | 删 Python、改 CI、改 README/docs（2026-09-24 完成，见文末「模块 G 清理」） |
 
 ## 绞杀者式上线
 
 Python 在**全部门类通过验收前不删**。`index.ts` 按命令逐条切换（`refresh` 用 py、
 `query` 用 ts 这类中间状态是允许的、也是安全的），每条命令只有在对应回归全绿后才切。
+**已完成**：A–F 全部验收后，G 于 2026-09-24 删除全部 Python。
 
 ## 回归策略（三层证据，每层都要）
 
 1. **黄金样本（golden fixtures，永久保留）**
-   用 Python 实现作为 oracle 生成输入/输出快照（合成 JSONL 会话 → 期望的
-   `manifest.json` + 分片文件字节），提交到 `tests/fixtures/`。
-   TS 实现必须**逐字节复现**。这样 CI 不再需要 Python，而回归强度不降 ——
-   Python 只在生成快照时当一次裁判。
+   迁移期用 Python 实现作为 oracle 生成输入/输出快照（合成 JSONL 会话 → 期望的
+   `manifest.json` + 分片文件字节），提交到 `tests/fixtures/`；TS 实现必须**逐字节复现**。
+   快照现在是**冻结**的（生成器 `tests/fixtures/generate_*.py` 已随 G 删除），
+   改动样本必须手工重算期望字节并逐字节 review diff。
 2. **测试逐条对等（永久保留）**
-   `tests/test_zgmem.py` 现有 25 个用例（清单见下）按名字一一迁到 `tests/*.test.ts`
-   （`unittest` → `node:test`）。**用例数只许多不许少**，迁移时必须能对齐清单。
-3. **差分对拍（迁移期一次性证据，完成即弃）**
+   `tests/test_zgmem.py` 的 25 个用例（清单见下）已按名字一一迁到 `tests/*.test.ts`
+   （`unittest` → `node:test`）。**用例数只许多不许少** —— 实际多出不少（TS 侧当前 76 个）。
+   原文件已随 G 删除。
+3. **差分对拍（迁移期一次性证据，已随 G 删除）**
    对同一批输入分别跑 Python 与 TS，比对产物字节级一致；并在**真实语料**上跑
-   （`~/.pi/agent/zgmem/`，当前 7 workspace / 244 个 `.txt` 分片 —— 该目录随会话增长，
-   数字只是对拍当天的快照）。
+   （`~/.pi/agent/zgmem/`，对拍当天快照 7 workspace / 244 个 `.txt` 分片）。
    最后再做一次真 `zg` 端到端冒烟。
 
    CLI 边界（argparse 那一层）另有 `tests/differential/cli_differential.ts`：两侧比
    **stdout 字节 + stderr 字节 + 退出码**（`-h`/usage 的换行与缩进、`--who bogus` 之类的报错文本、
-   `show --workspace all` 的拒绝路径都在内）。这一层是 25 个 Python 用例**盖不到**的 ——
-   它们只覆盖库函数，而 cli.ts 是用户直接看的那一层。
+   `show --workspace all` 的拒绝路径都在内）—— 终态 403 项全一致，变异脚本 `mutate_query.sh`
+   确认过这套对拍确实有敏感性（故意改坏 `lib/query.ts` 时对拍必须变红）。这一层是 25 个
+   Python 用例**盖不到**的 —— 它们只覆盖库函数，而 cli.ts 是用户直接看的那一层。
+
+   终态之后 `tests/differential/` 整个目录（含 `corpus_probe.py` / `refresh_entry.ts` /
+   `mutate_query.sh`）已删除；同等的端到端守护改由 `tests/runtime_boundary.test.ts` 常驻承担。
 
 现有 25 个用例的归属（迁移时按此对齐）：
 
@@ -130,6 +135,7 @@ L1 只能靠"文件年龄 > 租约"判定它是残留 —— 于是「刚跑完 
 
 迁移期 Python 原文件、`index.ts` 的 Python 调用路径都保留在 `main` 上；
 每个模块一个提交，出问题 `git revert` 单点即可，不必回退整条迁移。
+**模块 G 之后**：Python 原文件已不在工作区，回滚 G 需要从提交历史取回 `.py`（或连同 A–F 一起 revert）。
 
 ---
 
@@ -335,11 +341,42 @@ F 之后 `index.ts` 与 lib 之间只剩 argv 送达这一件事，已由上面�
 所以模块 E 的差分脚本对 rg 各例用“序无关比较（rank 抹平）”是必要的，rg 模式的逐字节对拍只能在
 单文件 fixture 上做。
 
-**模块 G 的欠账**（F 不改，留给 G）：删 3 个 `.py`（`zgmem.py`/`jsonl2corpus.py`/`zgmem_corpus.py`）、
-删 `extensions/zg-memory/tests/test_zgmem.py`、删 5 个差分脚本、CI 的 py job 与 pipeline job、
-README 里 `python3` 的残留（含「需要 `python3` 在 PATH 上」这条前置条件）。
+**模块 G 的欠账 → 已全部还清（2026-09-24）**：见「模块 G 清理」小节。
+
+### 模块 G 清理 — 完成（2026-09-24）
+
+删除（全仓 `.py` 归零）：
+
+- 实现：`extensions/zg-memory/zgmem.py`、`jsonl2corpus.py`、`zgmem_corpus.py`
+- Python 用例：`extensions/zg-memory/tests/test_zgmem.py`（25 条已全部迁完）
+- 差分脚手架：`tests/differential/` 整个目录（5 个 `*_differential.ts` + `corpus_probe.py` +
+  `refresh_entry.ts` + 变异脚本 `mutate_query.sh`）
+- 黄金样本生成器：`tests/fixtures/generate_etl_fixtures.py`、`generate_corpus_fixtures.py`（样本自此冻结）
+- CI：`tests` job（py 3.9/3.11/3.13，25 用例 + `py_compile`）与 `pipeline` job（python3 跑 ETL→refresh）
+- README（根中英 + 扩展）里 `python3` 的残留与「需要 `python3` 在 PATH 上」前置条件
+
+删除前把 `tests/differential/` 与 6 个被删文件整体备份到仓库外（`/tmp/zg-g-evidence-backup`），不随仓库提交。
+
+差分脚本里只有两处证据不在 TS 常驻套件里，删除前已安置：CLI 层的有意差异 → 内联到
+`extensions/zg-memory/lib/cli.ts` 头部注释；ETL 失败的 EISDIR 变体 → 提为常驻用例
+`tests/refresh.test.ts` 的 `test_etl_failure_eisdir_exits_2_but_still_indexes`
+（它比原 `chmod 000` 用例强：**root 下也能跑**，于是这条分支不再依赖环境）。
+
+验收对照：
+
+- [x] `find . -name '*.py'`（排除 node_modules）为空
+- [x] `tsc --noEmit` 0 错误；TS 套件 76 用例全绿（删掉的差分脚本本就不在 CI 里）
+- [x] `ci.yml` 不再引用 Python，只剩 `ts-tests` 与 `typecheck` 两个 job
+- [x] 冻结的黄金样本仍逐字节通过（证明删生成器不影响回归强度）
+
+**代价（已知且接受）**：删掉裁判后，日后若发现新的语义差异**无从再对拍**；
+同等的回归强度现在只由黄金样本 + `tests/runtime_boundary.test.ts` + 差分期的 403 项结论承担。
 
 ### 已知残余差异（已记录，**不修**）
+
+> CLI 层（argparse）的有意差异原登记在 `tests/differential/cli_differential.ts` 顶部；
+> 该文件已随模块 G 删除，记录改内联在 `extensions/zg-memory/lib/cli.ts` 头部注释的
+> 「已知（有意保留的）差异」一节。下面是库层的残余差异。
 
 - **`repr()` 对“Python 16 未分配、Node 17 已分配”码点的转义**：`int()` 收 Unicode 十进制数字（Nd）
   那部分是**已修**的（`query.pyInt` 是全量 Nd 表 + `int()` 自己的空白表，1122 例对拍 0 差异）；
@@ -349,7 +386,7 @@ README 里 `python3` 的残留（含「需要 `python3` 在 PATH 上」这条前
   码点打进 argv，而且这个差异随“用哪个 Python”变动（跑 Python 17 的一方就会和 TS 一致）；
   规则本身已全量核过：TS 侧“误转义”（该原样却转义）**0 个**，差异全部落在 Python 16 的 Cn 上。
   对照组：常见不可打印字符（`\x1c`、`\x7f`、NBSP、U+2028、U+3000、引号/反斜杠/`\n\r\t`）
-  逐字节一致，差分用例见 `tests/differential/cli_differential.ts` 的 `arg/int-{file-separator,nbsp,del,line-sep}`。
+  逐字节一致，差分用例（已随 G 删除）见 `tests/differential/cli_differential.ts` 的 `arg/int-{file-separator,nbsp,del,line-sep}`。
 
 - **非标准 JSON 字面量 `NaN` / `Infinity` / `-Infinity`**：Python `json.loads` 默认接受这三个字面量，
   JS `JSON.parse` 拒绝。实测（只有 `NaN` 的行）：Python 把该行以 `ts=0` 收进语料，TS 直接丢行，
@@ -384,7 +421,7 @@ README 里 `python3` 的残留（含「需要 `python3` 在 PATH 上」这条前
   所以 `runLib`/`zgIndex` 里只能重复写 256 MiB；已知残余：`ZGMEM_SUBPROCESS_MAX_BUFFER` 调到 256 MiB 以上时，
   子进程能产出而父进程会拒（反向不对称，仅测试钩子场景会碰到）。
 
-### 未迁移的 Python 用例（清单，避免被当成已迁移）
+### Python 用例的迁移归属（`test_zgmem.py` 已随 G 删除）
 
 `extensions/zg-memory/tests/test_zgmem.py` 的用例按模块登记迁移状态：
 
@@ -394,7 +431,7 @@ README 里 `python3` 的残留（含「需要 `python3` 在 PATH 上」这条前
 - [x] `TestH2HitRefinement.test_refine_hit_line_end_to_end` —— 已迁入 `tests/query.test.ts`（模块 C，超出原名用例）
 - [x] `TestM2IndexRefresh.*`（9 条，`test_zgmem.py:332-598`）—— 已按原名迁入 `tests/refresh.test.ts`（模块 D）
 
-**结论：`test_zgmem.py` 的 25 条已全部迁完**；该文件与 5 个差分脚本一起留给模块 G 删除。
+**结论：`test_zgmem.py` 的 25 条已全部迁完**（TS 侧另有新增用例，当前共 76 个）；原文件已随模块 G 删除。
 
 ### 测试/CI 缺口（三轮 reviewer 记录）
 
@@ -412,10 +449,10 @@ README 里 `python3` 的残留（含「需要 `python3` 在 PATH 上」这条前
       非 ASCII sid 端到端（ETL 写分片名 + manifest 键 + `ensure_ascii=False`）、user/assistant 配对跨分片边界
       （`tests/corpus.test.ts`，`readWindow` 的 needPrev/needNext 扩片）。
 - `tests/differential/*.ts`（corpus / etl / query / refresh / cli，共 5 个）是迁移期一次性证据，**故意不进 CI**
-  （需要 Python 当裁判）；随模块 B–E 提交进仓库，待模块 G 删 Python 时一并删除。
-  **F 起运行时已与 Python 无关**：端到端链路改由 `tests/runtime_boundary.test.ts` 常驻守着（不需要 Python）。
-- **`python3` 已退出运行时，但仍在 CI 里当裁判**：`tests` job（25 个 py 用例）与 `pipeline` job
-  （ETL → refresh 全链路）都是 Python 侧证据，模块 G 与 `.py` 一起删。
+  （需要 Python 当裁判）；已随模块 G 删除。
+  **端到端链路改由 `tests/runtime_boundary.test.ts` 常驻守着（不需要 Python）。**
+- **CI 里已无任何 Python**：原 `tests` job（25 个 py 用例）与 `pipeline` job（ETL → refresh 全链路）
+  都是迁移期的 Python 侧证据，已随 G 删除；保留的是 TS 套件 + typecheck + ETL CLI 真进程步骤。
 
 > **黄金样本盲区（未修，已知）**：`tests/etl.test.ts` 的黄金样本只对「Python 序列化出来的 manifest 文件」
 > 换成 `__SESSIONS_DIR__` 占位符后整字节比对，因此**只在 Python 写过那些键上生效**：若 TS 侧多写一个

@@ -27,7 +27,7 @@ import * as j2c from "../extensions/zg-memory/lib/etl.ts";
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const FIXTURES_ETL = path.join(HERE, "fixtures", "etl");
 const PLACEHOLDER = "__SESSIONS_DIR__";
-/** 生成器 tests/fixtures/generate_etl_fixtures.py 用的固定 mtime。 */
+/** 冻结的 fixture 使用的固定 mtime（生成器 `generate_etl_fixtures.py` 已随模块 G 删除）。 */
 const FIXTURE_MTIME = 1_700_000_000;
 const MSG_TS = 1_700_000_000_000;
 

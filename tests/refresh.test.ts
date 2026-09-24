@@ -10,12 +10,13 @@
  * 与 Python 侧的差异（逐条登记）：
  *  1. 不起子进程跑 CLI，而是进程内调 `refresh.runRefresh(scope, opts)`，断言 `{out, code}`。
  *     Python 侧断言 `proc.returncode`，这里对应 `code`；stdout 对应 `out`。
- *     模块 E（lib/cli.ts）落地后，CLI 层的落地/退出码另有差分对拍（tests/differential/refresh_*）。
+ *     模块 E（lib/cli.ts）落地后，CLI 层的落地/退出码另有差分对拍（ `tests/differential/refresh_*`，
+ *     已随模块 G 删除）；CLI 边界的常驻守护现在是 `tests/runtime_boundary.test.ts` 的真进程路径。
  *  2. 假 zg 仍然走 PATH 前置（跟 Python 一样：`runIndex` 真的 spawn "zg"），只有 lease/
  *     失败等分支才用注入的 `deps.zgIndex`。
  *  3. `test_etl_failure_exits_2_but_still_indexes`：Python 用 `chmod 000` 造 PermissionError，
  *     这里照旧（`geteuid()==0` 时跳过，root 拦不住）。同一分支的"目录冒充 jsonl"（EISDIR，
- *     root 也成立）由 tests/differential/refresh_differential.ts 覆盖。
+ *     root 也成立）由下一个用例 `...eisdir...` 覆盖（该变体原是差分脚本里的一例，模块 G 删脚本后留在仓库里）。
  *  4. `test_write_failure_keeps_old_segments_and_manifest`：Python monkeypatch `write_segment`
  *     在第 2 片注入 ENOSPC；TS 无法改模块导出（ESM 命名空间只读），改成**在第 2 片的临时文件
  *     路径上预先放一个目录** → `write_file` 必然 EISDIR，同样挂在第 2 片、同样走回滚路径。
@@ -280,7 +281,7 @@ test("TestM2IndexRefresh.test_write_failure_keeps_old_segments_and_manifest", ()
 test("TestM2IndexRefresh.test_etl_failure_exits_2_but_still_indexes", (t) => {
   // ETL 挂了（会话文件读不了）也要：退出码非 0 + zg 索引照跑 + 旧语料不被清掉
   if (typeof process.geteuid === "function" && process.geteuid() === 0) {
-    t.skip("root 下 chmod 000 拦不住读，没法制造 ETL 失败（该分支的 EISDIR 变体见差分对拍）");
+    t.skip("root 下 chmod 000 拦不住读，没法制造 ETL 失败（EISDIR 变体见下一个用例）");
     return;
   }
   const env = setup("ws-etl");
@@ -314,6 +315,47 @@ test("TestM2IndexRefresh.test_etl_failure_exits_2_but_still_indexes", (t) => {
   assert.ok(zc.sessions(manAfter)["s1"], "会话条目没被拿掉");
   assert.deepEqual(Object.keys(zc.segments(manAfter)).sort(), names);
   assert.deepEqual(blobs(scope.corpusDir), blob, "旧分片字节没被清空重写");
+});
+
+test("TestM2IndexRefresh.test_etl_failure_eisdir_exits_2_but_still_indexes", () => {
+  // 同上一用例的分支，但失败由“目录冒充 <sid>.jsonl”制造 → read 必然 EISDIR，
+  // **root 下也成立**，所以不需要 skip。（原是差分脚本 scenarioEtlFail 的一例，
+  // 模块 G 删脚本后把它变成常驻用例，免得 root 环境下这条分支彻底没覆盖。）
+  const env = setup("ws-etl-dir");
+  const scope = scopeOf(env);
+  const p = prepare(env);
+  const { bindir, log } = fakeZg(env, 0, "indexed 1 files");
+  makeMarker(scope.corpusDir);
+
+  const manBefore = zc.loadManifest(scope.manifestPath);
+  const names = Object.keys(zc.segments(manBefore)).sort();
+  assert.ok(names.length > 0);
+  const blob = blobs(scope.corpusDir);
+
+  fs.appendFileSync(p, `${msgLine("user", "新的问题", T0 + 400_000)}\n`); // 先造变化，否则“无变化”早退不会进 ETL
+  fs.mkdirSync(path.join(env.sessions, "broken.jsonl"), { recursive: true }); // ETL 读目录 → EISDIR
+
+  const proc = refresh(env, bindir);
+
+  assert.equal(proc.code, 2); // 有 session ETL 失败 → 退出码 2
+  assert.match(proc.out, /ETL 失败/);
+  assert.match(proc.out, /EISDIR/);
+  assert.match(proc.out, /注意: 1\/2 个 session ETL 失败/);
+  assert.match(proc.out, /索引已更新/); // ETL 失败也不阻断 zg 索引
+  assert.match(fs.readFileSync(log, "utf8"), /index \./);
+
+  // 好会话的条目还在、旧分片也没被清空（内容只能往后追加：s1 那个新行确实要落盘，
+  // 所以这里钉的是“旧字节仍是新字节的前缀”，而不是逐字节相等 —— 与原用例不同，
+  // 那边 s1 自己就是失败的那个，什么都不会重写。）
+  const manAfter = zc.loadManifest(scope.manifestPath);
+  assert.ok(zc.sessions(manAfter)["s1"], "会话条目没被拿掉");
+  const now = blobs(scope.corpusDir);
+  for (const n of names) {
+    assert.ok(now[n], `旧分片 ${n} 不见了`);
+    assert.ok(now[n].length >= blob[n].length, `旧分片 ${n} 变短了`);
+    assert.equal(Buffer.compare(now[n].subarray(0, blob[n].length), blob[n]), 0, `旧分片 ${n} 的历史字节被改写`);
+  }
+  assert.equal(zc.sessions(manAfter)["broken"], undefined, "失败的会话不进 manifest");
 });
 
 test("TestM2IndexRefresh.test_corpus_change_during_index_is_not_declared_indexed", () => {

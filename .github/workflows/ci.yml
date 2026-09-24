@@ -14,40 +14,14 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  tests:
-    name: tests · py${{ matrix.python }} · ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-        python: ["3.9", "3.13"]
-        include:
-          - os: ubuntu-latest
-            python: "3.11"
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python }}
-
-      # 全程不装 zvec-grep / ripgrep: 套件用假 zg 二进制 + 临时数据目录驱动 ETL 与 CLI。
-      # 哪天某个用例开始要求 PATH 上有真的 zg/rg, 这里就会红 —— 正是想要的信号。
-      - name: Run offline test suite
-        run: python3 extensions/zg-memory/tests/test_zgmem.py
-
-      - name: Every script still compiles
-        run: python3 -m py_compile extensions/zg-memory/*.py extensions/zg-memory/tests/*.py
-
   ts-tests:
     name: tests · node${{ matrix.node }} · ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        # 与 py job 保持同样的 OS 矩阵：扩展实际跑在开发机（macOS）上，
-        # 只测 Linux 会把 mtime 精度、文件名规范化这类差异漏掉。
+        # 扩展实际跑在开发机（macOS）上，只测 Linux 会把 mtime 精度、
+        # 文件名规范化这类差异漏掉，所以两个 OS 都跑。
         os: [ubuntu-latest, macos-latest]
         # 22 = 迁移后的最低支持版本（类型擦除在 22.6 就有了，但 22 需要显式 --experimental-strip-types；
         # 24 起默认开启，所以下面的命令统一显式带上这个 flag，两个版本行为一致）。
@@ -61,21 +35,20 @@ jobs:
 
       # TS 侧回归：单元用例 + 黄金样本逐字节比对 + **模块 F 的运行时边界**
       # （tests/runtime_boundary.test.ts 会起真子进程跑 node lib/*.ts，假 zg 挂 PATH）。零运行时依赖，不需要 npm ci。
-      # 也不需要 Python —— 黄金样本已由 tests/fixtures/generate_corpus_fixtures.py 生成并提交，
-      # 所以 CI 不再把 Python 当裁判（见 docs/plan-ts-migration.md 回归策略第 1 层）。
-      # 注意：tests/differential/ 是迁移期的一次性证据（需要 Python），故意不在这里跑。
+      # 迁移已完成：黄金样本是**冻结**的（生成它的 Python 脚本已随模块 G 删除），
+      # 仓库里不再有任何 Python，CI 只剩 Node 这一条判据路径。
       - name: Run TS regression suite
         run: |
           set -o pipefail
           node --experimental-strip-types --test --test-reporter=tap | tee /tmp/ts-test.tap
           # 发现即失败：用例文件被改名/移走时 node 会以 0 用例 exit 0，必须显式兜底。
-          # 当前 71 个；用 pass+skipped 于是 root 环境下 refresh.test.ts 的 skip（见 refresh.test.ts:280-283）
+          # 当前 76 个；用 pass+skipped 于是 root 环境下 refresh.test.ts 的 skip（见 refresh.test.ts:280-283）
           # 不会把 CI 拉红（普通 runner 上 skipped=0）。加用例时记得同步 bump 这个数字。
           # （--test-reporter=tap 是必须的：node22 默认 TAP、
           # node24 默认 spec，不锁 reporter 这个 grep 会在 22 上失效）
           pass=$(grep -E '^# pass [0-9]+' /tmp/ts-test.tap | tail -1 | awk '{print $3}')
           skipped=$(grep -E '^# skipped [0-9]+' /tmp/ts-test.tap | tail -1 | awk '{print $3}')
-          test "$(( ${pass:-0} + ${skipped:-0} ))" -ge 71
+          test "$(( ${pass:-0} + ${skipped:-0} ))" -ge 76
 
       # 把迁移计划里的两条硬约束变成 CI 断言，而不是靠人记得：
       #   1. 只用可擦除语法 —— 每个模块都要能被 node 直接解析执行（无 enum/namespace/装饰器）
@@ -158,73 +131,3 @@ jobs:
 
       - name: tsc --noEmit
         run: npx tsc --noEmit -p tsconfig.json
-
-  pipeline:
-    name: ETL → refresh pipeline (no index engine)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.13"
-
-      # 端到端跑用户真正会碰到的入口: 建语料 → 无变化 refresh(应 no-op) →
-      # 追加一条后 refresh(应走增量, 只有尾片重嵌) → 列出会话。
-      # 故意不需要 zg: 用一个只认 `zg index . --embedding X` 的假二进制顶上。
-      #
-      # 这是 **Python 侧**的证据（模块 G 与 .py 一起删）。同一件事在 TS 运行时上由
-      # tests/runtime_boundary.test.ts 常驻守着（走 node lib/*.ts，不需要 Python），
-      # 所以这里删掉时覆盖不会掉。
-      - name: ETL bootstrap → no-op refresh → incremental refresh
-        run: |
-          set -euo pipefail
-
-          work=$(mktemp -d)
-          export ZGMEM_DIR="$work/zgmem"
-          export ZG_FAKE_LOG="$work/zg-calls.log"
-          sessions="$work/sessions/--Users-ci-demo--"
-          mkdir -p "$sessions" "$work/bin"
-
-          cat > "$work/bin/zg" <<'SH'
-          #!/bin/sh
-          echo "zg $*" >> "${ZG_FAKE_LOG:-/dev/null}"
-          mkdir -p "$PWD/.zvec-grep/index.zvec"
-          : > "$PWD/.zvec-grep/index.zvec/sentinel"
-          echo "indexed 1 files"
-          SH
-          chmod +x "$work/bin/zg"
-          export PATH="$work/bin:$PATH"
-
-          cat > "$sessions/session-ci.jsonl" <<'EOF'
-          {"type":"session","id":"session-ci","timestamp":"2026-01-01T00:00:00.000Z"}
-          {"type":"message","id":"m1","timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"user","content":[{"type":"text","text":"how do we index the corpus?"}]}}
-          {"type":"message","id":"m2","timestamp":"2026-01-01T00:00:02.000Z","message":{"role":"assistant","content":[{"type":"text","text":"we shard it per session."}]}}
-          {"type":"message","id":"m3","timestamp":"2026-01-01T00:00:03.000Z","message":{"role":"user","content":[{"type":"text","text":"and the tail shard?"}]}}
-          {"type":"message","id":"m4","timestamp":"2026-01-01T00:00:04.000Z","message":{"role":"assistant","content":[{"type":"text","text":"only the tail gets re-embedded."}]}}
-          EOF
-
-          ETL=extensions/zg-memory/jsonl2corpus.py
-          MEM=extensions/zg-memory/zgmem.py
-          CORPUS="$ZGMEM_DIR/ci-demo/corpus"
-
-          echo "=== 1. ETL 建语料(顺带建 manifest) ==="
-          python3 "$ETL" "$sessions/*.jsonl" "$CORPUS"
-
-          echo "=== 2. refresh: 无变化, 应 no-op ==="
-          python3 "$MEM" refresh --sessions-dir "$sessions" --workspace ci-demo
-
-          echo "=== 3. 追加一条后 refresh: 应走增量 ==="
-          echo '{"type":"message","id":"m5","timestamp":"2026-01-01T00:00:05.000Z","message":{"role":"user","content":[{"type":"text","text":"does the tail shard get re-embedded?"}]}}' >> "$sessions/session-ci.jsonl"
-          python3 "$MEM" refresh --sessions-dir "$sessions" --workspace ci-demo
-
-          echo "=== 4. sessions 应列出 session-ci ==="
-          python3 "$MEM" sessions --workspace ci-demo | tee "$work/sessions.txt"
-          grep -q session-ci "$work/sessions.txt"
-
-          echo "=== 5. 断言 ==="
-          shards=$(find "$ZGMEM_DIR" -name '*.txt' | wc -l | tr -d ' ')
-          echo "shards=$shards  zg 调用=$(wc -l < "$ZG_FAKE_LOG" | tr -d ' ')"
-          test "$shards" -ge 1
-          test -n "$(find "$ZGMEM_DIR" -name 'manifest.json')"
-          echo "pipeline OK"

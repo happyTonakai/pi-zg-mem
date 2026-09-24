@@ -13,7 +13,8 @@
  * 因此 usage/help/报错文本是按 argparse 的算法**算出来的**（不是手抄的常量），
  * 改选项只改下面的 spec 表。
  *
- * 已知（有意保留的）差异都在 cli_differential.ts 顶部登记，当前只有两条：
+ * 已知（有意保留的）差异（原登记在 `tests/differential/cli_differential.ts` 顶部，该文件已随模块 G 删除，
+ * 记录内联在此；终态差分 403 项全一致）：
  *   1. argparse 的 `--hel` 这类**长选项前缀缩写**：这里同样支持（唯一前缀才认，歧义报错）。
  *   2. Python 的 `%` 格式化/`!r` 风格报错文本按字面复刻；`--who bogus` 的 choose from 顺序
  *      跟 spec 表一致（argparse 按 choices 原序）。

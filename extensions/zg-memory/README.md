@@ -9,7 +9,7 @@ source of truth，供 agent 在需要历史记忆时**主动召回**。
 
 ```
 ~/.pi/agent/sessions/**/*.jsonl     原始会话（完整：时间/角色/thinking/工具调用）
-        │  jsonl2corpus.py（清洗：只留 user/assistant 文本，去掉噪声）
+        │  lib/etl.ts（清洗：只留 user/assistant 文本，去掉噪声）
         ▼
 ~/.pi/agent/zgmem/<scope>/corpus/   干净语料（按 session 分片: <session>.p0001.txt, p0002, … + 尾片；每行带源行号）
         │  zg index（多语言向量 + BM25 混合索引；只重嵌发生变化的片）
@@ -37,20 +37,16 @@ zg_memory_open   ←——  回指 JSONL 深钻（thinking / 工具调用 / 扩�
 | 文件 | 作用 |
 | --- | --- |
 | `index.ts` | pi extension：注册 2 个工具 + 1 个命令 + 生命周期钩子；工具/命令都走 `node lib/*.ts` 子进程 |
-| `jsonl2corpus.py` | ETL：JSONL → 干净语料**分片**（一行一条消息 `行号\t角色\t时间\t文本`），维护 `manifest.json` v2（corpus 分片 ↔ JSONL 映射、前缀哈希/offset 变更检测、分片元数据）；原子写 + 文件锁 + 单实例（flock） |
-| `zgmem.py` | 检索与回指：`query / show / ctx / sessions / refresh` |
-| `zgmem_corpus.py` | 分片 / 配对共享库（被 ETL 与 CLI 同时 import） |
-| `lib/corpus.ts` | `zgmem_corpus.py` 的 TypeScript 移植（迁移模块 A，已完成；产物逐字节对拍零差异） |
-| `lib/etl.ts` | `jsonl2corpus.py` 的 TypeScript 移植（迁移模块 B，已完成；差分对拍零差异） |
-| `lib/query.ts` | 只读路径 query / show / ctx / sessions（`zgmem.py` 查询侧，模块 C） |
-| `lib/refresh.ts` | 写入路径 ETL + `zg index` + 索引戳/重试（`zgmem.py` 刷新侧，模块 D） |
-| `lib/cli.ts` | argparse 兼容的 CLI 前端：`node lib/cli.ts <cmd>`（模块 E）|
+| `lib/corpus.ts` | 分片 / 配对共享库：切片切分、`(session, line)` 回指、manifest 读写 |
+| `lib/etl.ts` | ETL：JSONL → 干净语料**分片**（一行一条消息 `行号\t角色\t时间\t文本`），维护 `manifest.json` v2（corpus 分片 ↔ JSONL 映射、前缀哈希/offset 变更检测、分片元数据）；原子写 + 文件锁 + 单实例（flock） |
+| `lib/query.ts` | 只读路径：`query / show / ctx / sessions` |
+| `lib/refresh.ts` | 写入路径：ETL + `zg index` + 索引戳/重试 |
+| `lib/cli.ts` | argparse 兼容的 CLI 前端：`node lib/cli.ts <cmd>` |
 
-> **运行时 = `index.ts` + `lib/*.ts`**（模块 F 起）：`index.ts` 起的是
-> `node --experimental-strip-types lib/cli.ts` / `lib/etl.ts` 子进程，**不再有 `python3`**。
-> 上表前三个 `.py` 只是迁移期的差分裁判（`python3 xxx.py <argv>` ≡ `node lib/xxx.ts <argv>`，逐字节），
-> 模块 G 与 Python 一起删；`python3` 也只用于那些差分脚本。
-> 计划与逐模块证据见 [docs/plan-ts-migration.md](../../docs/plan-ts-migration.md)。
+> **运行时 = `index.ts` + `lib/*.ts`，纯 Node**：`index.ts` 起的是
+> `node --experimental-strip-types lib/cli.ts` / `lib/etl.ts` 子进程。
+> Python → TypeScript 迁移已完成（模块 A–F 逐模块对拍验收，模块 G 删掉全部 Python 与差分脚手架），
+> 本仓已无任何 `.py`。计划与逐模块证据见 [docs/plan-ts-migration.md](../../docs/plan-ts-migration.md)。
 
 ## 给 agent 的工具
 
@@ -147,19 +143,19 @@ embedding 模型（无变更时 zg 直接秒退、不加载）。想再降只能
 
 ```bash
 # 克隆目录下（通过 pi 安装则为
-# ~/.pi/agent/git/github.com/happyTonakai/pi-zg-mem/extensions/zg-memory/zgmem.py）
-Z=./extensions/zg-memory/zgmem.py
+# ~/.pi/agent/git/github.com/happyTonakai/pi-zg-mem/extensions/zg-memory/lib/cli.ts）
+Z=./extensions/zg-memory/lib/cli.ts
 
-python3 $Z query "codegraph 和 zvec 有什么区别" --top 3
-python3 $Z query "上次那个报错码" --mode rg
-python3 $Z query "上周说过什么" --since 7
-python3 $Z query "..." --workspace all          # 跨所有 workspace
-python3 $Z query "..." --json              # 结构化输出（含 ref 与 ts）
+node --experimental-strip-types $Z query "codegraph 和 zvec 有什么区别" --top 3
+node --experimental-strip-types $Z query "上次那个报错码" --mode rg
+node --experimental-strip-types $Z query "上周说过什么" --since 7
+node --experimental-strip-types $Z query "..." --workspace all   # 跨所有 workspace
+node --experimental-strip-types $Z query "..." --json            # 结构化输出（含 ref 与 ts）
 
-python3 $Z show <session> <corpus_line> --full   # 深钻单条
-python3 $Z ctx <session> <corpus_line> --span 5  # 扩展上下文
-python3 $Z sessions                             # 列会话
-python3 $Z refresh --sessions-dir <dir>         # 增量刷新
+node --experimental-strip-types $Z show <session> <corpus_line> --full   # 深钻单条
+node --experimental-strip-types $Z ctx <session> <corpus_line> --span 5  # 扩展上下文
+node --experimental-strip-types $Z sessions                              # 列会话
+node --experimental-strip-types $Z refresh --sessions-dir <dir>          # 增量刷新
 ```
 
 环境变量：`ZGMEM_SCOPE`（可选，显式指定 workspace；缺省时**自动派生**：按 `PI_SESSION_FILE` 会话目录 slug（去首尾 `-`）→ 否则回退唯一已初始化 workspace → 再回退 `github`，因此**移全局后每项目天然隔离**）、`ZGMEM_DIR`、`ZGMEM_EMBEDDING`
@@ -172,12 +168,12 @@ python3 $Z refresh --sessions-dir <dir>         # 增量刷新
 
 **有意不做 / 待办**：
 - **只做主动召回**（被动捕获/自动摘要沉淀）明确为下一步，本版不含。
-- **Python → TypeScript 迁移进行中**：语料层（模块 A）与 ETL 层（模块 B）已移植完并有逐字节差分证据，
-  其余（query / refresh / CLI / 入口切换）未迁，因此 `python3` 仍是运行时硬依赖。
+- **Python → TypeScript 迁移已完成**：模块 A–F 逐模块移植并有逐字节差分证据，模块 G 删掉了全部 Python
+  实现、Python 用例与差分脚手架 —— 运行时与 CI 都不再需要 `python3`。
 - **fragment 级向量复用**（只嵌新增行、复用已冻结片的向量）需要改上游 `zg` 的索引格式，
   暂不做；当前用"分片 + 尾片"近似达到"每轮成本有界"（方案 A）。
 - workspace 已按会话目录派生（全局可用）；跨 workspace 检索只覆盖已初始化过的项目，
   **从不打开的项目不预建**（用户决策：没启动过的会话不重要，放着即可）。
 - 首次全量建索引已改后台（`session_start` 不 await、single-flight，查询撞上共享同一 promise）。
-- 依赖 `zg`、`rg`、`python3` 在 PATH 上；**仅适配 macOS/Linux**（win32 的 `python`/`zg.cmd`/路径分隔未处理）。
+- 依赖 `zg`、`rg` 在 PATH 上（需要 Node 22.6+ 或 24+）；**仅适配 macOS/Linux**（win32 的 `zg.cmd`/路径分隔未处理）。
 - 时间过滤粒度 = 会话文件（`mtime` 戳为会话开始时间），非消息级。

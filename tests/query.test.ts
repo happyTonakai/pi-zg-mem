@@ -3,9 +3,9 @@
  *
  * 迁移自 Python 的用例（名字保持原样，便于逐条对照）：
  *   TestH2HitRefinement.test_refine_hit_line_end_to_end
- * 其余用例是**差分/变异证据转成的常驻断言**：tests/differential/query_differential.ts 属迁移期
- * 一次性证据（模块 G 会删），下面这些点正是变异测试里“改坏了必须红”的地方
- * （见 tests/differential/mutate_query.sh）：
+ * 其余用例是**差分/变异证据转成的常驻断言**：差分脚本（`tests/differential/query_differential.ts`）
+ * 与变异脚本（`tests/differential/mutate_query.sh`）是迁移期一次性证据、已随模块 G 删除，
+ * 它们当时“改坏了必须红”的点留在这里常驻：
  *   - rg 的 since 单位（`now_ms - since*86400*1000`，写错差 1000 倍）
  *   - rg who 过滤 / --session glob / pairFromJsonl 兜底
  *   - 跨 workspace 去重键必须含 session（否则不同 session 的同号行被合并）
@@ -427,8 +427,8 @@ test("runCtx.unknown_session_and_bad_corpus_line", () => {
 });
 
 // ---------- pyInt：Python `int()` 的十进制解析 ----------
-// 迁移期的证据在 tests/differential/query_differential.ts + /tmp 的 Nd 全量对拍（1122 例：全部 760 个 Nd
-// 码点 + 76 个 Nd 段边界 + 对抗样例，与 CPython 逐条一致）；模块 G 会删掉那些脚本，这里留常驻断言。
+// 迁移期的证据是 `tests/differential/query_differential.ts` + /tmp 的 Nd 全量对拍（1122 例：全部 760 个 Nd
+// 码点 + 76 个 Nd 段边界 + 对抗样例，与 CPython 逐条一致）；那些脚本已随模块 G 删除，这里留常驻断言。
 // 为什么不是“不可达”：q.pyInt 是 argparse 的 `type=`（cli.ts:517），用户 argv 直接可控。
 
 test("pyInt.accepts_unicode_nd_digits_like_cpython", () => {

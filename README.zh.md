@@ -92,11 +92,10 @@ pi list          # 确认已注册
 **验证是否正常**
 
 ```bash
-node --experimental-strip-types --test                # 68 个 TypeScript 用例：不联网、不需要 zg、不需要 Python
-python3 extensions/zg-memory/tests/test_zgmem.py     # 25 个 Python 用例（迁移期裁判，模块 G 删）
+node --experimental-strip-types --test                # 76 个 TypeScript 用例：不联网、不需要 zg、不需要 Python
 ```
 
-[CI](.github/workflows/ci.yml) 跑：TypeScript 套件（Node 22 / 24，Ubuntu 与 macOS 双平台）、`tsc --noEmit` 类型检查，以及 Python 套件（3.9 / 3.11 / 3.13）与一个端到端跑 Python 入口的 pipeline job（ETL → 无变化 refresh → 增量 refresh）—— Python 那两个 job 是迁移期裁判，最终与 `.py` 一起删。同一件事在 TypeScript 运行时上由 `tests/runtime_boundary.test.ts` 永久守着（起真 `node lib/*.ts` 子进程）。
+[CI](.github/workflows/ci.yml) 跑：TypeScript 套件（Node 22 / 24，Ubuntu 与 macOS 双平台）与 `tsc --noEmit` 类型检查——仓库里已经没有任何 Python。端到端链路（ETL → 无变化 refresh → 增量 refresh → sessions）在 TypeScript 运行时上由 `tests/runtime_boundary.test.ts` 永久守着（起真 `node lib/*.ts` 子进程）。
 
 ## 使用
 
@@ -147,8 +146,7 @@ zgc sessions                               # 列出已索引会话
 zgc refresh --sessions-dir <dir>           # 增量刷新
 ```
 
-> Python 前端（`zgmem.py`）参数一样、现在也一样能用，但它不再是运行时：
-> `python3 zgmem.py <argv>` ≡ `node lib/cli.ts <argv>`，逐字节一致（模块 E 差分）。
+> CLI 从 Python 移植过来时带逐字节差分证据，Python 前端已删（现在只有 `node lib/cli.ts <argv>` 一个实现）。
 
 在 pi 里则用 `/zgmem refresh`、`/zgmem reindex`、`/zgmem sessions`。
 
@@ -199,9 +197,9 @@ zgc refresh --sessions-dir <dir>           # 增量刷新
 
 ## 现状、边界与后续
 
-**已完成并验证：** ETL、混合 + 精确召回、回指深钻、增量维护、extension 工具暴露。68 个 TypeScript 用例（`node --experimental-strip-types --test`）加 25 个 Python 用例（迁移期裁判）与真机 `zg` 端到端冒烟。Python 设计经过独立评审（[`docs/reviews/`](docs/reviews/)），TypeScript 迁移过程中又做了三轮 reviewer，两批结论与修复均有记录，后者在 [`docs/plan-ts-migration.md`](docs/plan-ts-migration.md)。
+**已完成并验证：** ETL、混合 + 精确召回、回指深钻、增量维护、extension 工具暴露。76 个 TypeScript 用例（`node --experimental-strip-types --test`）与真机 `zg` 端到端冒烟。Python 设计经过独立评审（[`docs/reviews/`](docs/reviews/)），TypeScript 迁移过程中又做了三轮 reviewer，两批结论与修复均有记录，后者在 [`docs/plan-ts-migration.md`](docs/plan-ts-migration.md)。
 
-**迁移进行中。** 运行时已逐模块从 Python 迁到 TypeScript，每一步都有与 Python 实现逐字节对拍的证据。从模块 F 起**运行时已不再起 `python3` 子进程** —— 扩展走的是 `node lib/*.ts` 子进程（`lib/cli.ts` / `lib/etl.ts`）；`python3` 现在只用于迁移期的差分对拍（`tests/differential/`，模块 G 与 `.py` 一起删）。计划、逐模块证据与未迁移用例清单见 [`docs/plan-ts-migration.md`](docs/plan-ts-migration.md)。
+**迁移已完成。** 运行时已逐模块从 Python 迁到 TypeScript，每一步都有与 Python 实现逐字节对拍的证据；模块 G 随后删掉了 Python 实现、Python 用例与差分脚手架。扩展走的是 `node lib/*.ts` 子进程（`lib/cli.ts` / `lib/etl.ts`）——仓库里已无任何 Python。计划、逐模块证据与已记录（不修）的语义差异见 [`docs/plan-ts-migration.md`](docs/plan-ts-migration.md)。
 
 **已知边界**
 
@@ -222,16 +220,11 @@ zgc refresh --sessions-dir <dir>           # 增量刷新
 # （`pi-coding-agent` 解包 400MB+，tsc 和测试都用不到）
 npm i --no-package-lock --legacy-peer-deps
 npx tsc --noEmit -p tsconfig.json        # 与 CI 相同的严格配置
-node --experimental-strip-types --test   # 68 个用例：不需要 zg、不联网、不需要 Python
+node --experimental-strip-types --test   # 76 个用例：不需要 zg、不联网、不需要 Python
 ```
 
 `types/peers.d.ts` 把 pi 的 peer 依赖声明成环境模块，因此不再需要从全局 `pi` 安装里软链
-`node_modules` 了。Python 文件除标准库外无依赖，它们是**迁移期裁判**而不是运行时：
-
-```bash
-node --experimental-strip-types tests/differential/cli_differential.ts   # py vs ts 逐字节（模块 E）
-python3 extensions/zg-memory/tests/test_zgmem.py                         # 25 个 Python 用例，冻结到模块 G
-```
+`node_modules` 了。
 
 ## 许可
 

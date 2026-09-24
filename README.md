@@ -92,11 +92,10 @@ Then `/reload` (or restart pi). From a local clone, `pi install /absolute/path/t
 **Verify it works**
 
 ```bash
-node --experimental-strip-types --test                # 68 TypeScript tests: no network, no zg, no Python
-python3 extensions/zg-memory/tests/test_zgmem.py     # 25 Python tests kept as the migration oracle (module G deletes them)
+node --experimental-strip-types --test                # 76 TypeScript tests: no network, no zg, no Python
 ```
 
-[CI](.github/workflows/ci.yml) runs the TypeScript suite on Node 22 / 24 across Ubuntu and macOS, a `tsc --noEmit` typecheck, the Python suite (3.9 / 3.11 / 3.13) plus a pipeline job that drives the Python entry points end-to-end (ETL → no-op refresh → incremental refresh) — the Python jobs are the migration oracle and go away with the `.py` files. The same end-to-end path on the TypeScript runtime is covered permanently by `tests/runtime_boundary.test.ts`, which starts real `node lib/*.ts` subprocesses.
+[CI](.github/workflows/ci.yml) runs the TypeScript suite on Node 22 / 24 across Ubuntu and macOS plus a `tsc --noEmit` typecheck — there is no Python left anywhere in the repo. The end-to-end path (ETL → no-op refresh → incremental refresh → sessions) on the TypeScript runtime is covered permanently by `tests/runtime_boundary.test.ts`, which starts real `node lib/*.ts` subprocesses.
 
 ## Usage
 
@@ -147,8 +146,8 @@ zgc sessions                               # list indexed sessions
 zgc refresh --sessions-dir <dir>           # incrementally refresh
 ```
 
-> The Python front end (`zgmem.py`) took the same arguments and still does, but it is no longer the
-> runtime: `python3 zgmem.py <argv>` ≡ `node lib/cli.ts <argv>` byte-for-byte (module E differential).
+> The CLI was ported from Python with byte-for-byte differential evidence; the Python front end is gone
+> (`node lib/cli.ts <argv>` is now the only implementation).
 
 Inside pi, `/zgmem refresh`, `/zgmem reindex` and `/zgmem sessions` do the same.
 
@@ -199,9 +198,9 @@ This indexes **all of your session history** — including thinking blocks and t
 
 ## Status, limits, roadmap
 
-**Working and tested:** the ETL, hybrid + exact recall, drill-down, incremental maintenance, the extension surface. 68 TypeScript tests (`node --experimental-strip-types --test`), plus the 25 Python tests kept as the migration oracle, and a real-`zg` end-to-end smoke test. The Python design went through independent review ([`docs/reviews/`](docs/reviews/)), and the TypeScript migration added three reviewer rounds on top; both sets of findings and fixes are recorded, the latter in [`docs/plan-ts-migration.md`](docs/plan-ts-migration.md).
+**Working and tested:** the ETL, hybrid + exact recall, drill-down, incremental maintenance, the extension surface. 76 TypeScript tests (`node --experimental-strip-types --test`) and a real-`zg` end-to-end smoke test. The Python design went through independent review ([`docs/reviews/`](docs/reviews/)), and the TypeScript migration added three reviewer rounds on top; both sets of findings and fixes are recorded, the latter in [`docs/plan-ts-migration.md`](docs/plan-ts-migration.md).
 
-**Migration in progress.** The runtime was moved from Python to TypeScript one module at a time, each step with byte-for-byte differential evidence against the Python implementation. As of module F the **runtime no longer shells out to `python3`** — the extension starts `node lib/*.ts` subprocesses (`lib/cli.ts` / `lib/etl.ts`); `python3` is now only needed for the migration-era differential harnesses (`tests/differential/`, deleted in module G together with the `.py` files). Plan, per-module evidence and the list of not-yet-migrated test cases: [`docs/plan-ts-migration.md`](docs/plan-ts-migration.md).
+**Migration complete.** The runtime was moved from Python to TypeScript one module at a time, each step with byte-for-byte differential evidence against the Python implementation; module G then deleted the Python implementation, the Python test suite and the differential harnesses. The extension starts `node lib/*.ts` subprocesses (`lib/cli.ts` / `lib/etl.ts`) — the repo contains no Python at all. Plan, per-module evidence and the recorded (unfixed) semantic differences: [`docs/plan-ts-migration.md`](docs/plan-ts-migration.md).
 
 **Known limits**
 
@@ -222,17 +221,11 @@ No runtime npm dependencies — the TypeScript code uses only `node:` builtins. 
 # (unpacking pi-coding-agent is 400 MB+ and is not needed for tsc or the tests)
 npm i --no-package-lock --legacy-peer-deps
 npx tsc --noEmit -p tsconfig.json        # same strict config CI runs
-node --experimental-strip-types --test   # 68 tests: no zg, no network, no Python
+node --experimental-strip-types --test   # 76 tests: no zg, no network, no Python
 ```
 
 `types/peers.d.ts` declares the pi peer dependencies as ambient modules, which is why nothing
-has to be symlinked out of your global `pi` install any more. The Python files need nothing but
-the standard library — they are the **migration oracle**, not the runtime:
-
-```bash
-node --experimental-strip-types tests/differential/cli_differential.ts   # py vs ts, byte-for-byte (module E)
-python3 extensions/zg-memory/tests/test_zgmem.py                         # 25 Python tests, frozen until module G
-```
+has to be symlinked out of your global `pi` install any more.
 
 ## License
 
