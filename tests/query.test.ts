@@ -239,6 +239,29 @@ test("rgCandidates.raises_on_maxbuffer_instead_of_silently_returning_nothing", (
   assert.equal(q.rgCandidates(scopeA, { query: MARKER }, 5, "ws-a").length, baseline.length);
 });
 
+/**
+ * A1（第三轮评审：Module G 删掉 Python 后零守卫的静默错答案）：“rg 非零退出 → 丢掉整个
+ * workspace 的候选”，输出仍是“(无命中)”。真实触发路径 = manifest 里还留着 jsonl_path、文件已被删。
+ *
+ * 因为 zgmem.py:350 也是同一行为（忠于 Python），这里钉的是**现状**而不是“应该抛”：想改就得连
+ * docs/plan-ts-migration.md「已知残余差异 · rg 子进程非零退出时会丢掉全部候选」一起改。
+ * 与上面的 maxBuffer 用例的分工：那条只守 `proc.error`（真正的启动失败/ENOBUFS），这条守 `status!==0`。
+ */
+test("rgCandidates.nonzero_rg_exit_returns_empty_not_throw (A1)", () => {
+  const { home, scopeA } = buildFixture();
+  const env = queryEnv(home, "ws-a");
+  assert.ok(q.rgCandidates(scopeA, { query: MARKER }, 5, "ws-a").length > 0, "前置：文件还在时必须能命中");
+
+  // 把 manifest 里登记的所有 jsonl 全删掉 → rg 找不到任何 target，退 2（不是“没命中”的 1）
+  for (const m of Object.values(zc.sessions(scopeA.manifest))) {
+    if (typeof m.jsonl_path === "string") fs.unlinkSync(m.jsonl_path);
+  }
+  assert.deepEqual(q.rgCandidates(scopeA, { query: MARKER }, 5, "ws-a"), [], "非零退出不能抛，只丢候选");
+  const res = q.runQuery({ query: MARKER, mode: "rg", workspace: "ws-a" }, env);
+  assert.equal(res.code, 0);
+  assert.equal(res.out, "(无命中)\n", "坏掉的 workspace 与“真的没命中”在输出上仍不可分（已知残余，不是 bug 修复点）");
+});
+
 test("runQuery.workspace_all_dedupes_by_session_not_by_jsonl_line", () => {
   const { home } = buildFixture();
   // ws-a 与 ws-b 各有一份 sessP 拷贝（jsonl 路径不同、session/jsonl_line 相同）→ 只能出一条；
@@ -323,6 +346,30 @@ test("runQuery.zg_failure_keeps_single_workspace_semantics", () => {
   });
 });
 
+/**
+ * A2（同 A1）：`--workspace all` 扇出时，某个 workspace 的 zg 非零退出被 `continue` 静默跳过 ——
+ * 它的 stderr 不进结果，于是“某个 workspace 坏了”与“它没命中”在输出上不可分。同样忠于 Python，
+ * 所以钉现状（见 docs/plan-ts-migration.md「已知残余差异 · `--workspace all` 扇出时静默丢失败 workspace」）。
+ * 与上一条的分工：上一条所有 workspace 都坏（退出码），这条只有 ws-b 坏（**好 workspace 的结果必须还在**）。
+ */
+test("runQuery.workspace_all_silently_drops_failed_workspace (A2)", () => {
+  const { home } = buildFixture();
+  // 假 zg 按 cwd 分叉：ws-b 的语料目录 exit 1 + 一句 stderr，ws-a 照常返回命中。
+  // （lib 里 spawnSync 的 cwd 就是 scope.corpusDir，所以 $PWD 能区分 workspace。）
+  const script = `#!/bin/sh
+case "$PWD" in
+  */ws-b/*) echo "BOOM_WS_B: embedding daemon down" >&2; exit 1 ;;
+esac
+${FAKE_ZG}`;
+  withFakeZg(script, () => {
+    const all = q.runQuery({ query: "图书直播选题", workspace: "all", top: 5 }, queryEnv(home, "ws-a"));
+    assert.equal(all.code, 0);
+    const heads = all.out.split("\n").filter((l) => l.startsWith("--- ["));
+    assert.deepEqual(heads.map((l) => l.slice(0, 7)), ["--- [1]", "--- [2]", "--- [3]"], "ws-a 的命中必须还在（一个坏 workspace 不能拖垮整轮扇出）");
+    assert.equal(all.out.includes("BOOM_WS_B"), false, "坏 workspace 的 stderr 不进结果（已知残余）");
+  });
+});
+
 // ---------- show / ctx ----------
 
 test("runShow.slices_text_and_thinking_at_800", () => {
@@ -377,6 +424,85 @@ test("runCtx.unknown_session_and_bad_corpus_line", () => {
   const env = queryEnv(home, "ws-a");
   assert.equal(q.runCtx("nope", 1, 3, "ws-a", env).out, "unknown session nope\n");
   assert.equal(q.runCtx("sessP", 999999, 3, "ws-a", env).out, "bad corpus line\n");
+});
+
+// ---------- pyInt：Python `int()` 的十进制解析 ----------
+// 迁移期的证据在 tests/differential/query_differential.ts + /tmp 的 Nd 全量对拍（1122 例：全部 760 个 Nd
+// 码点 + 76 个 Nd 段边界 + 对抗样例，与 CPython 逐条一致）；模块 G 会删掉那些脚本，这里留常驻断言。
+// 为什么不是“不可达”：q.pyInt 是 argparse 的 `type=`（cli.ts:517），用户 argv 直接可控。
+
+test("pyInt.accepts_unicode_nd_digits_like_cpython", () => {
+  // CPython 的 int() 经 _PyUnicode_TransformDecimalAndSpaceToASCII 按 Nd 属性映射数字
+  assert.equal(q.pyInt("٣"), 3);
+  assert.equal(q.pyInt("٣٤"), 34);
+  assert.equal(q.pyInt("１２"), 12); // 全角
+  assert.equal(q.pyInt("５"), 5);
+  assert.equal(q.pyInt("𝟎𝟏"), 1); // U+1D7CE.. 数学粗体
+  assert.equal(q.pyInt("०१"), 1); // 天城文
+});
+
+test("pyInt.rejects_non_nd_and_bad_shapes", () => {
+  const bad = [
+    "²", "①", "〇", "零", "Ⅰ", "５٠²", // No/Nl/Lo —— “像数字”但不是 Nd
+    "\u{116cf}", "\u{116e4}", // Nd 段边界外（0x116D0..0x116D9 与 0x116DA..0x116E3 是两段）
+    "٣_", "_٣", "1__0", "٣.٥", "٣e2", "٣ ٤", "\u3000", "", "-", "+",
+    "\u001c5", "\u001d5", "\u001e5", "\u001f5", // int() 不认这些（str.strip() 认）
+    "\ufeff5", // JS 认空白、Python 不认
+  ];
+  for (const t of bad) {
+    assert.throws(() => q.pyInt(t), /invalid literal for int\(\) with base 10/, `${JSON.stringify(t)} 应被拒`);
+  }
+});
+
+test("pyInt.unicode_digits_full_rule_set", () => {
+  assert.equal(q.pyInt("-٣"), -3);
+  assert.equal(q.pyInt("+٣"), 3);
+  assert.equal(q.pyInt("٣_٤"), 34);
+  assert.equal(q.pyInt("１２_٣٤"), 1234);
+  assert.equal(q.pyInt("1٣"), 13);
+  assert.equal(q.pyInt("\u3000٣\u3000"), 3); // U+3000 在 int() 的空白表里
+  assert.equal(q.pyInt("\u{116da}"), 0); // 段首（Nandinagari 第二段）
+  assert.equal(q.pyInt("\u{116d9}"), 9); // 相邻前一段的段尾，不能因为“往回走 9 步”算法而误读
+  assert.equal(q.pyInt("\u{116e3}"), 9); // 段尾
+  assert.equal(q.pyInt("\u{1d7f6}"), 0);
+  assert.equal(q.pyInt("\u{1d7ff}"), 9);
+  // `int("-0")` 就是 0，不能留 JS 的 -0
+  assert.equal(Object.is(q.pyInt("-0"), 0), true);
+  assert.equal(Object.is(q.pyInt("-𝟎"), 0), true);
+  // pyStrip 的两套空白表不能被合并：str.strip() 剥 \x1c-\x1f，int() 不剥
+  assert.equal(q.pyStrip("\u001c5"), "5");
+  assert.throws(() => q.pyInt("\u001c5"), /invalid literal/);
+});
+
+test("pyRepr.matches_python_str_repr", () => {
+  // Python3 的 str repr 保留可打印非 ASCII，只转义不可打印字符（str.isprintable() 为假）
+  assert.equal(q.pyRepr("abc"), "'abc'");
+  assert.equal(q.pyRepr("٣"), "'٣'");
+  assert.equal(q.pyRepr("a'b"), `"a'b"`); // 含单引号用双引号包，不转义
+  assert.equal(q.pyRepr('a"b'), `'a"b'`);
+  assert.equal(q.pyRepr(`a'"b`), `'a\\'"b'`); // 两种引号都有 → 用单引号包、转义单引号
+  assert.equal(q.pyRepr("a\\b"), "'a\\\\b'");
+  assert.equal(q.pyRepr("a\nb\tc\rd"), "'a\\nb\\tc\\rd'");
+  assert.equal(q.pyRepr("\x00"), "'\\x00'");
+  assert.equal(q.pyRepr("\x1c5"), "'\\x1c5'");
+  assert.equal(q.pyRepr("\x7f"), "'\\x7f'");
+  assert.equal(q.pyRepr("\xa0x"), "'\\xa0x'"); // NBSP（Zs）
+  assert.equal(q.pyRepr("\u2028x"), "'\\u2028x'"); // LS（Zl）
+  assert.equal(q.pyRepr("\u3000x"), "'\\u3000x'"); // 全角空格（Zs）
+  assert.equal(q.pyRepr(" "), "' '"); // ASCII 空格是 Zs 但可打印
+  assert.equal(q.pyRepr("😀"), "'😀'"); // So 可打印
+  assert.equal(q.pyRepr(`\u{1f600}`), "'😀'");
+  assert.equal(q.pyRepr("\u{116cf}"), "'\\U000116cf'"); // Python 16 与 Node 17 都是 Cn → 两边都转义
+  // Unicode 版本表差异（已记录不修）：U+088F 在 Python 16 是 Cn（转义）、在 Node 的 17 里已分配（原样）
+  assert.equal(q.pyRepr("\u{88f}"), "'\u{88f}'");
+  // 选逸分支的阈值/宽度各由一个变异杀死：\x 上界 0xff、\u 上界 0xffff（U+FFFF 会变 \U）、
+  // \u 的 padStart(4) 只要不补零就被 U+061C 杀掉（不补零会得到 \u61c）
+  assert.equal(q.pyRepr("\u00ad"), "'\\xad'"); // Cf：\x 分支
+  assert.equal(q.pyRepr("\u061c"), "'\\u061c'"); // Cf：\u 分支需补零到 4 位
+  assert.equal(q.pyRepr("\uffff"), "'\\uffff'"); // Cn：\u 分支上界
+  assert.equal(q.pyRepr("\u{e0001}"), "'\\U000e0001'"); // Cf：\U 分支
+  assert.equal(q.pyRepr("\u{10000}"), "'\u{10000}'"); // >0xFFFF 但可打印 → 原样
+  assert.equal(q.pyRepr(null), "None");
 });
 
 // ---------- workspace 派生 ----------

@@ -43,6 +43,16 @@ function intEnv(name: string, def: number): number {
  * rg 召回就会被当成“没有命中”而**静默给出错答案**。所以这里给一个够大的上限，
  * 并且**每次调用都读环境变量**（ZGMEM_SUBPROCESS_MAX_BUFFER），好让回归测试把它调小、
  * 钉住“不许静默吞掉”这条性质。
+ *
+ * 这条路径在 Python 侧**根本不存在**（`subprocess.run(capture_output=True)` 读多少都不会失败），
+ * 所以「逐字节对拍」对它没有约束力：上限取值只能自己拍板。回归用例见
+ * `tests/query.test.ts:rgCandidates.raises_on_maxbuffer_instead_of_silently_returning_nothing`
+ * （同时钉住默认值 > 1 MiB）。
+ *
+ * 已知残余（不修）：`extensions/zg-memory/index.ts` 不 import lib（边界约定），它的 `runLib` /
+ * `zgIndex` 只能把这个 256 MiB 再写一遍字面量；于是把 `ZGMEM_SUBPROCESS_MAX_BUFFER` 调到
+ * 256 MiB 以上时是**反向不对称**的 —— 子进程（lib）按 env 放行、父进程（index.ts）拒收。
+ * 只有测试钩子会碰到，故不修。
  */
 export function subprocessMaxBuffer(): number {
   return intEnv("ZGMEM_SUBPROCESS_MAX_BUFFER", 256 * 1024 * 1024);

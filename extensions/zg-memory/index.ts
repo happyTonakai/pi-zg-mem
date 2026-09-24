@@ -119,6 +119,9 @@ function runLib(script: string, args: string[], timeoutMs = 120_000, extraSignal
     // 与 lib/corpus.ts 的 subprocessMaxBuffer() 默认值(256 MiB)保持一致: 默认才 1 MiB,
     // 大 workspace 的 `show --full` / 话多的 zg index 会撞上。index.ts 不 import lib
     // (边界约定), 所以这里只能用同一个字面量, 改动时要两边一起改。
+    // 已知残余(不修): 正因如此, 把 ZGMEM_SUBPROCESS_MAX_BUFFER 调到 256 MiB 以上时是
+    // **反向不对称**的 —— 子进程(lib)按 env 放行、父进程(这里)拒收; 只有测试钩子会碰到。
+    // 这条路径在 Python 侧不存在(subprocess.run 无 maxBuffer 概念), 所以对拍不上, 只能自己拍板。
     maxBuffer: 256 * 1024 * 1024,
     timeout: timeoutMs,
     signal,
@@ -130,6 +133,7 @@ async function zgIndex(cwd: string, rebuild = false): Promise<void> {
   if (rebuild) args.push("--rebuild");
   args.push("--embedding", EMBEDDING);
   // 同上: 与 lib/refresh.ts:runIndex 的 spawnSync 上限保持一致(都是 subprocessMaxBuffer() 的默认值)。
+  // 「两套字面量」的残余与理由见 runLib 的注释。
   await execFileAsync("zg", args, { cwd, timeout: 300_000, maxBuffer: 256 * 1024 * 1024, signal: liveAbort().signal });
 }
 

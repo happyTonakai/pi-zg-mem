@@ -37,6 +37,13 @@ interface OptSpec {
 interface PosSpec {
   name: string;
   kind: "str" | "int";
+  /**
+   * py: `add_subparsers(required=True)` 生成的 `_SubParsersAction` —— `nargs='PARSER'` 的位置参数，
+   * 会**吃掉剩下的全部 token**（含选项），再把除首 token 外的那些交给子解析器。
+   * 顶层 `cmd` 走的就是这条（见 `TOP_SPEC`）；子命令的 `parseCmd` 碰不到它。
+   */
+  sub?: boolean;
+  choices?: string[];
 }
 
 interface CmdSpec {
@@ -113,6 +120,13 @@ const CMDS: CmdSpec[] = [
 ];
 
 const CMD_NAMES = CMDS.map((c) => c.name);
+
+// 顶层解析器：`cmd` 是 nargs='PARSER' 的位置参数（choices=子命令名），剩余 token 交给子解析器。
+export const TOP_SPEC: CmdSpec = {
+  name: "zgmem",
+  opts: [],
+  pos: [{ name: "cmd", kind: "str", sub: true, choices: CMD_NAMES }],
+};
 
 function cmdOf(name: string): CmdSpec {
   const spec = CMDS.find((c) => c.name === name);
@@ -303,129 +317,412 @@ interface Parsed {
   values: Record<string, string | number | boolean | null>;
   positionals: (string | number)[];
   help: boolean;
+  /**
+   * py: `cmd` 位置参数（`nargs='PARSER'`）交给子解析器的那段 argv —— 仅顶层会出现。
+   * 与 argparse 一致：子解析器拿到的是 `cmd` **之后**的原始 token（选项原样传下去）。
+   */
+  subArgv?: string[];
+  /**
+   * py: 只在**顶层**用（`subArgv !== undefined` 时）—— 顶层 `parse_args` 的
+   * `unrecognized arguments: %s` 检查发生在**子解析器跑完之后**：子解析器自己的
+   * required/choice 错误会先出（`--bogus query` → `query` 的 required 错误），
+   * 只有子解析器没报错时才会轮到这里。
+   */
+  extras?: string[];
 }
 
-function isLongOpt(tok: string): boolean {
-  return tok.startsWith("--") && tok.length > 2;
+// ---------- argparse 仿真 ----------
+//
+// 为什么是"照着算法重写"而不是继续逐 token 手写规则：argparse 的解析是**两遍**的 —— 先给每个
+// token 分类（`_parse_optional` → 'A' 位置参数 / 'O' 选项 / '-' 分隔符），再拿 nargs 正则在这串
+// 分类上做匹配（`match_argument` / `_match_arguments_partial`）。顺序反过来就分叉：
+// 「像选项的值」(`--session -x`) 不是"取值时跳过"，而是"分类阶段就记成 'O'，于是 --session 只拿到
+// 0 个参数 → expected one argument"；`-hx` 也不是"未知短选项"，而是 `-h` 带一个 explicit arg。
+// 下面把 CPython 3.14 `Lib/argparse.py` 的那几个函数按原样搬过来，函数名保留 py 的，便于对读。
+
+/** py: argparse 的 action —— 选项与位置参数统一建模（只保留 zgmem.py 用到的那几种）。 */
+interface Action {
+  /** py: `action.dest` —— 位置参数的报错名，也是 `values` 的键 */
+  dest: string;
+  /** py: `action.option_strings` —— 空数组 = 位置参数 */
+  optionStrings: string[];
+  /** py: `action.nargs` —— 只用到 0(help/store_true) / 1(None) / 'PARSER'(顶层子命令) */
+  nargs: 0 | 1 | "PARSER";
+  /** py: `action.type` —— 只有 int 与非 int 两种 */
+  type: "int" | null;
+  choices: readonly string[] | null;
+  default: unknown;
+  /** py: `add_help=True` 生成的 `_HelpAction`（它直接 raise SystemExit(0)，不往 namespace 写值） */
+  help?: boolean;
 }
 
-/** py: argparse 的 `--opt` 唯一前缀缩写（`--hel` → `--help`；歧义则报错）。 */
-function resolvePrefix(spec: CmdSpec, name: string): string | null {
-  const all = ["--help", ...spec.opts.map((o) => o.name)];
-  if (all.includes(name)) return name;
-  const hits = all.filter((n) => n.startsWith(name));
-  if (hits.length === 1) return hits[0];
-  if (hits.length > 1) {
-    throw new UsageError(
-      spec.name,
-      `ambiguous option: ${name} could match ${hits.join(", ")}`,
-    );
-  }
-  return null;
-}
-
-function parseIntArg(cmd: string, label: string, raw: string): number {
-  // py: argparse 的 `type=int` → 失败报 invalid int value（Python 的 int() 接受前后空白与正负号）
-  const t = raw.trim();
-  if (!/^[+-]?\d+$/.test(t)) {
-    throw new UsageError(cmd, `argument ${label}: invalid int value: '${raw}'`);
-  }
-  return Number.parseInt(t, 10);
+/** py: `argparse._get_action_name(action)` —— 选项用 option_strings、位置参数用 dest。 */
+function actionName(action: Action): string {
+  if (action.optionStrings.length > 0) return action.optionStrings.join("/");
+  return action.dest;
 }
 
 /**
- * 逐 token 解析。注意 argparse 的两个"反直觉"行为（都照抄）：
- *   - 认不出的选项/多余的参数 → **顶层** usage + `zgmem: error: unrecognized arguments: ...`
- *     （子解析器把没消费的交给父解析器，父解析器统一报错）；
- *   - 缺位置参数/取值非法 → **子命令** usage + `zgmem <cmd>: error: ...`。
+ * py: `_negative_number_matcher = re.compile(r'-\.?\d')`（argparse.py:1465）。
+ * `re.match` 是**从头**匹配；`\d` 在 Python 里是 Unicode 十进制数字，所以用 `\p{Nd}` 而不是 JS 的 ASCII `\d`。
+ */
+const NEGATIVE_NUMBER_RE = /^-\.?\p{Nd}/u;
+
+/** py: `ArgumentParser._get_nargs_pattern(action)` —— 只列 zgmem.py 会遇到的三组。 */
+function nargsPattern(action: Action): string {
+  const opt = action.optionStrings.length > 0;
+  if (action.nargs === 0) return opt ? "()" : "(-*)";
+  if (action.nargs === 1) return opt ? "([A])" : "(-*A-*)";
+  return opt ? "(A[AO]*)" : "(-*A[-AO]*)";
+}
+
+/** py: `ArgumentParser._match_argument(action, arg_strings_pattern)` —— 返回吃掉的 pattern 字符数。 */
+function matchArgument(cmd: string, action: Action, pattern: string): number {
+  const m = new RegExp(`^${nargsPattern(action)}`).exec(pattern);
+  if (!m) {
+    // py: `nargs_errors` —— 这里只有 nargs=None 那条会走到（nargs=0/1 的 pattern 不会失败）
+    throw new UsageError(cmd, `argument ${actionName(action)}: expected one argument`);
+  }
+  return (m[1] ?? "").length;
+}
+
+/**
+ * py: `ArgumentParser._match_arguments_partial(actions, arg_strings_pattern)` —— 位置参数的整体匹配。
+ * 返回值是每个位置参数各吃掉几个 pattern 字符，**含** `--` 那种 '-' 字符（`consume_positionals`
+ * 就是靠这个长度把 '--' 一起前进掉的）。
+ */
+function matchArgumentsPartial(actions: Action[], pattern: string): number[] {
+  for (let i = actions.length; i > 0; i -= 1) {
+    const pat = actions.slice(0, i).map(nargsPattern).join("");
+    const m = new RegExp(`^${pat}`).exec(pattern);
+    if (!m) continue;
+    const result = m.slice(1).map((g) => (g ?? "").length);
+    // py: 只匹配上前一段、且下一字符是 'O'（紧跟选项）时，抹掉尾部长度为 0 的匹配
+    if (m[0].length < pattern.length && pattern[m[0].length] === "O") {
+      while (result.length > 0 && result[result.length - 1] === 0) result.pop();
+    }
+    return result;
+  }
+  return [];
+}
+
+/**
+ * py: help action 的两条 `raise SystemExit(0)` 语义 —— 当场停手，后面的参数不再解析。
+ */
+class HelpExit extends Error {}
+
+/**
+ * 逐 token 解析（py: `ArgumentParser.parse_known_args` 在**子解析器**上的那一遍）。
+ * 两条"反直觉"的分工都照抄：
+ *   - 认不出的选项/多余的参数 → 子解析器只把它们**交出去**（extras），由顶层解析器统一报
+ *     **顶层** usage + `zgmem: error: unrecognized arguments: ...`；
+ *   - 缺位置参数/取值非法/歧义 → 在这里抛 → **子命令** usage + `zgmem <cmd>: error: ...`。
  */
 export function parseCmd(spec: CmdSpec, argv: string[]): Parsed {
-  const values: Record<string, string | number | boolean | null> = { workspace: null };
-  for (const o of spec.opts) values[o.name.replace(/^--/, "").replace(/-/g, "_")] = o.default ?? null;
-  const positionals: (string | number)[] = [];
-  const extra: string[] = [];
-  let help = false;
-  let noMoreOpts = false;
+  const cmdName = spec.name;
+  const argStrings = argv;
 
-  for (let i = 0; i < argv.length; i += 1) {
-    const tok = argv[i];
-    if (noMoreOpts || tok === "-" || !tok.startsWith("-")) {
-      positionals.push(tok);
-      continue;
-    }
-    if (tok === "--") {
-      noMoreOpts = true;
-      continue;
-    }
-    let name = tok;
-    let inline: string | null = null;
-    if (isLongOpt(tok)) {
-      const eq = tok.indexOf("=");
-      if (eq >= 0) {
-        name = tok.slice(0, eq);
-        inline = tok.slice(eq + 1);
-      }
-      const resolved = resolvePrefix(spec, name);
-      if (resolved === "--help") {
-        // argparse 的 -h/--help 是**当场**生效（add_help 的 action 直接 raise SystemExit）
-        return { values, positionals, help: true };
-      }
-      if (resolved === null) {
-        extra.push(tok);
-        continue;
-      }
-      name = resolved;
-    } else if (tok === "-h") {
-      return { values, positionals, help: true };
-    } else {
-      extra.push(tok);
-      continue;
-    }
+  // py: `add_help=True` 的那个 action 排在所有用户选项**之前**（歧义前缀的枚举顺序就是它）
+  const actions: Action[] = [
+    { dest: "help", optionStrings: ["-h", "--help"], nargs: 0, type: null, choices: null, default: null, help: true },
+  ];
+  for (const o of spec.opts) {
+    actions.push({
+      dest: o.name.replace(/^--/, "").replace(/-/g, "_"),
+      optionStrings: [o.name],
+      nargs: o.kind === "flag" ? 0 : 1,
+      type: o.kind === "int" ? "int" : null,
+      choices: o.choices ?? null,
+      default: o.default ?? null,
+    });
+  }
+  for (const p of spec.pos) {
+    actions.push({
+      dest: p.name,
+      optionStrings: [],
+      nargs: p.sub ? "PARSER" : 1,
+      type: p.kind === "int" ? "int" : null,
+      choices: p.choices ?? null,
+      default: null,
+    });
+  }
 
-    const opt = spec.opts.find((o) => o.name === name);
-    if (!opt) {
-      extra.push(tok);
-      continue;
-    }
-    const key = opt.name.replace(/^--/, "").replace(/-/g, "_");
-    if (opt.kind === "flag") {
-      if (inline !== null) {
-        throw new UsageError(spec.name, `argument ${opt.name}: ignored explicit argument '${inline}'`);
+  // py: `_option_string_actions` —— 一个按**插入顺序**枚举的 dict（歧义报错列出的顺序就是它）
+  const optionMap = new Map<string, Action>();
+  for (const a of actions) for (const os of a.optionStrings) optionMap.set(os, a);
+  const optionStringList = [...optionMap.keys()];
+  // py: `_has_negative_number_optionals` —— 有"像负数"的选项时，负数 token 才不再算位置参数
+  const hasNegativeNumberOptionals = optionStringList.some((s) => NEGATIVE_NUMBER_RE.test(s));
+
+  const values: Record<string, string | number | boolean | null> = {};
+  for (const a of actions) if (!a.help) values[a.dest] = a.default as string | number | boolean | null;
+  const positionalsOut: (string | number)[] = [];
+  // py: `_get_positional_actions()` —— 还没被消费掉的位置参数（`consume_positionals` 会切片）
+  const positionalsLeft: Action[] = actions.filter((a) => a.optionStrings.length === 0);
+  const extras: string[] = [];
+  const seen = new Set<Action>();
+  /** py: `_SubParsersAction` 写回 namespace 的那部分 —— 子命令名 + 它的 argv（见 `Parsed.subArgv`）*/
+  let subArgv: string[] | undefined;
+
+  // ---- py: `_get_option_tuples(option_string)` ----
+  type OptTuple = [Action | null, string, string | null, string | null];
+  const getOptionTuples = (argString: string): OptTuple[] => {
+    const result: OptTuple[] = [];
+    const eq = argString.indexOf("=");
+    const optionPrefix = eq >= 0 ? argString.slice(0, eq) : argString;
+    const sep = eq >= 0 ? "=" : null;
+    const explicitArg = eq >= 0 ? argString.slice(eq + 1) : null;
+    if (argString[0] === "-" && argString[1] === "-") {
+      // 双前缀只按 '=' 切分；`allow_abbrev=True` → 顺带按前缀枚举（`--mod` → `--mode`）
+      for (const [os, action] of optionMap) {
+        if (os.startsWith(optionPrefix)) result.push([action, os, sep, explicitArg]);
       }
-      values[key] = true;
-      continue;
+      return result;
     }
-    let raw: string;
-    if (inline !== null) raw = inline;
+    // 单字符选项可以和它的参数**拼**在一起（`-x5` == `-x 5`），长选项必须分开
+    const shortOptionPrefix = argString.slice(0, 2);
+    const shortExplicitArg = argString.slice(2);
+    for (const [os, action] of optionMap) {
+      if (os === shortOptionPrefix) result.push([action, os, "", shortExplicitArg]);
+      else if (os.startsWith(optionPrefix)) result.push([action, os, sep, explicitArg]);
+    }
+    return result;
+  };
+
+  // ---- py: `_parse_optional(arg_string)` → None(位置参数) 或 tuple 列表 ----
+  const parseOptional = (argString: string): OptTuple[] | null => {
+    if (argString === "") return null;
+    if (argString[0] !== "-") return null; // py: prefix_chars = '-'
+    const exact = optionMap.get(argString);
+    if (exact) return [[exact, argString, null, null]];
+    if (argString.length === 1) return null; // 单个 '-' 是位置参数
+    const eq = argString.indexOf("=");
+    if (eq >= 0) {
+      const named = optionMap.get(argString.slice(0, eq));
+      if (named) return [[named, argString.slice(0, eq), "=", argString.slice(eq + 1)]];
+    }
+    const tuples = getOptionTuples(argString);
+    if (tuples.length > 0) return tuples;
+    // 像负数的 token 是位置参数（除非有"像负数"的选项）；含空格的也是位置参数
+    if (NEGATIVE_NUMBER_RE.test(argString) && !hasNegativeNumberOptionals) return null;
+    if (argString.includes(" ")) return null;
+    // 认不出但"像选项" → action 记 None，交给上面当 extras
+    return [[null, argString, null, null]];
+  };
+
+  // ---- py: `take_action` → `_get_values` + `_check_value` ----
+  const takeAction = (action: Action, argStringsForAction: string[], _optionString: string | null): void => {
+    seen.add(action);
+    if (action.help) {
+      // py: `_HelpAction.__call__` → print_help() + exit(0)，**当场**生效
+      throw new HelpExit();
+    }
+    if (action.nargs === 0) {
+      // py: `_StoreTrueAction` —— 不看参数，写 const=True
+      values[action.dest] = true;
+      return;
+    }
+    if (action.nargs === "PARSER") {
+      // py: `_SubParsersAction.__call__` —— `values[0]` 是子命令名（先过 `_check_value` 的 choices），
+      // 剩下的原样给子解析器。"invalid choice" 是**顶层**的报错（顶层 usage）。
+      const name = argStringsForAction[0] ?? "";
+      if (action.choices !== null && !action.choices.includes(name)) {
+        const list = action.choices.map((c) => q.pyRepr(String(c))).join(", ");
+        throw new UsageError(cmdName, `argument ${actionName(action)}: invalid choice: ${q.pyRepr(name)} (choose from ${list})`);
+      }
+      values[action.dest] = name;
+      subArgv = argStringsForAction.slice(1);
+      return;
+    }
+    const raw = argStringsForAction[0] ?? "";
+    let value: string | number = raw;
+    if (action.type === "int") {
+      try {
+        value = q.pyInt(raw);
+      } catch {
+        // py: `_get_value` 的 `except (TypeError, ValueError)` → `invalid int value: %(value)r`
+        throw new UsageError(cmdName, `argument ${actionName(action)}: invalid int value: ${q.pyRepr(raw)}`);
+      }
+    }
+    if (action.choices !== null && !action.choices.includes(String(value))) {
+      // py: `_check_value` → `invalid choice: %(value)r (choose from %(choices)s)`
+      const list = action.choices.map((c) => q.pyRepr(String(c))).join(", ");
+      throw new UsageError(
+        cmdName,
+        `argument ${actionName(action)}: invalid choice: ${q.pyRepr(String(value))} (choose from ${list})`,
+      );
+    }
+    if (action.optionStrings.length > 0) values[action.dest] = value;
+    else positionalsOut.push(value);
+  };
+
+  // py: `_parse_known_args` 的前半段 —— 先把每个 token 分类成 'A'/'O'/'-'
+  const optionStringIndices = new Map<number, OptTuple[]>();
+  const patternParts: string[] = [];
+  for (let i = 0; i < argStrings.length; i += 1) {
+    if (argStrings[i] === "--") {
+      // `--` 之后（含它自己）全都不是选项；'-' 之外的部分一律记 'A'
+      patternParts.push("-");
+      for (let j = i + 1; j < argStrings.length; j += 1) patternParts.push("A");
+      break;
+    }
+    const tuples = parseOptional(argStrings[i]);
+    if (tuples === null) patternParts.push("A");
     else {
-      const next = argv[i + 1];
-      if (next === undefined) throw new UsageError(spec.name, `argument ${opt.name}: expected one argument`);
-      raw = next;
-      i += 1;
+      optionStringIndices.set(i, tuples);
+      patternParts.push("O");
     }
-    if (opt.choices && !opt.choices.includes(raw)) {
-      const list = opt.choices.map((c) => `'${c}'`).join(", ");
-      throw new UsageError(spec.name, `argument ${opt.name}: invalid choice: '${raw}' (choose from ${list})`);
+  }
+  const pattern = patternParts.join("");
+
+  const consumePositionals = (start: number): number => {
+    const argCounts = matchArgumentsPartial(positionalsLeft, pattern.slice(start));
+    let idx = start;
+    for (let k = 0; k < argCounts.length; k += 1) {
+      const action = positionalsLeft[k];
+      const args = argStrings.slice(idx, idx + argCounts[k]);
+      // py: 位置参数吃掉的那段里若含 '--'（pattern 里的 '-'），把**第一个** '--' 从值里删掉。
+      // 但 PARSER（顶层 `cmd`）有**独立**分支（argparse.py:2237-2245）：只有 '--' 在本段**首位**
+      // 时剥，否则原样交给子解析器（由子命令行自己再剥一次）。不分开就会把
+      // `query -- --top 3 x` 的 `--top` 当选项，而 Python 把它当位置参数。
+      if (argCounts[k] > 0) {
+        const strip =
+          action.nargs === "PARSER" ? pattern[idx] === "-" : pattern.slice(idx, idx + argCounts[k]).includes("-");
+        if (strip) {
+          const at = args.indexOf("--");
+          if (at >= 0) args.splice(at, 1);
+        }
+      }
+      idx += argCounts[k];
+      takeAction(action, args, null);
     }
-    values[key] = opt.kind === "int" ? parseIntArg(spec.name, opt.name, raw) : raw;
+    positionalsLeft.splice(0, argCounts.length);
+    return idx;
+  };
+
+  const consumeOptional = (start: number): number => {
+    const tuples = optionStringIndices.get(start);
+    if (!tuples) throw new Error(`argparse 仿真内部错误: ${start} 不在 option_string_indices 里`);
+    if (tuples.length > 1) {
+      // py: 多个 action 命中同一前缀 → 歧义（注意这条也是**子命令** usage）
+      const options = tuples.map((t) => t[1]).join(", ");
+      // 注意：py 这里是 `ArgumentError(None, ...)`，但它在**子解析器**的 `_parse_known_args` 里抛，
+      // 由子解析器的 `error()` 接住 → 子命令 usage（不是顶层）。
+      throw new UsageError(cmdName, `ambiguous option: ${argStrings[start]} could match ${options}`);
+    }
+    let [action, optionString, sep, explicitArg] = tuples[0];
+    let stop = start;
+    const taken: [Action, string[], string][] = [];
+    for (;;) {
+      // py: 认不出的选项 → extras（顶层再报 unrecognized arguments）
+      if (action === null) {
+        extras.push(argStrings[start]);
+        return start + 1;
+      }
+      if (explicitArg !== null) {
+        const argCount = matchArgument(cmdName, action, "A");
+        // py: 单字符选项且不吃参数时，可以从选项串尾巴里再切出下一个选项（`-xy` == `-x -y`）
+        if (argCount === 0 && optionString[1] !== "-" && explicitArg !== "") {
+          if (sep || explicitArg[0] === "-") {
+            throw new UsageError(
+              cmdName,
+              `argument ${actionName(action)}: ignored explicit argument ${q.pyRepr(explicitArg)}`,
+            );
+          }
+          taken.push([action, [], optionString]);
+          const ch = optionString[0];
+          optionString = ch + explicitArg[0];
+          const next = optionMap.get(optionString);
+          if (next) {
+            action = next;
+            explicitArg = explicitArg.slice(1);
+            if (explicitArg === "") {
+              sep = null;
+              explicitArg = null;
+            } else if (explicitArg[0] === "=") {
+              sep = "=";
+              explicitArg = explicitArg.slice(1);
+            } else {
+              sep = "";
+            }
+          } else {
+            extras.push(ch + explicitArg);
+            stop = start + 1;
+            break;
+          }
+        } else if (argCount === 1) {
+          stop = start + 1;
+          taken.push([action, [explicitArg], optionString]);
+          break;
+        } else {
+          // py: 双横线选项不吃 explicit arg → ignored explicit argument（`--json=1`）
+          throw new UsageError(
+            cmdName,
+            `argument ${actionName(action)}: ignored explicit argument ${q.pyRepr(explicitArg)}`,
+          );
+        }
+      } else {
+        // 没带 explicit arg：从**后面**的 token 里按 nargs 正则取（取值时不重新分类，
+        // 分类阶段已经决定了下一个 token 是不是选项）
+        const from = start + 1;
+        const argCount = matchArgument(cmdName, action, pattern.slice(from));
+        stop = from + argCount;
+        taken.push([action, argStrings.slice(from, stop), optionString]);
+        break;
+      }
+    }
+    for (const [a, args, os] of taken) takeAction(a, args, os);
+    return stop;
+  };
+
+  try {
+    let startIndex = 0;
+    const maxOptionStringIndex = optionStringIndices.size > 0 ? Math.max(...optionStringIndices.keys()) : -1;
+    while (startIndex <= maxOptionStringIndex) {
+      // 先吃掉紧邻的下一个选项**之前**的位置参数
+      let nextOptionStringIndex = startIndex;
+      while (nextOptionStringIndex <= maxOptionStringIndex) {
+        if (optionStringIndices.has(nextOptionStringIndex)) break;
+        nextOptionStringIndex += 1;
+      }
+      if (startIndex !== nextOptionStringIndex) {
+        const end = consumePositionals(startIndex);
+        if (end > startIndex) {
+          startIndex = end;
+          continue;
+        }
+        startIndex = end;
+      }
+      // 位置参数吃不动了、又不在选项下标上 → 这一串都是 extras
+      if (!optionStringIndices.has(startIndex)) {
+        extras.push(...argStrings.slice(startIndex, nextOptionStringIndex));
+        startIndex = nextOptionStringIndex;
+      }
+      startIndex = consumeOptional(startIndex);
+    }
+    // py: 非 intermixed → 最后一个选项之后还能再吃一轮位置参数，剩下的都算 extras
+    const stopIndex = consumePositionals(startIndex);
+    extras.push(...argStrings.slice(stopIndex));
+
+    // py: 必填的位置参数（nargs=None 的位置参数 required 默认为真）
+    const missing = actions
+      .filter((a) => a.optionStrings.length === 0 && !seen.has(a))
+      .map(actionName);
+    if (missing.length > 0) {
+      throw new UsageError(cmdName, `the following arguments are required: ${missing.join(", ")}`);
+    }
+  } catch (e) {
+    if (e instanceof HelpExit) return { values, positionals: positionalsOut, help: true };
+    throw e;
   }
 
-  if (extra.length > 0) {
-    throw new UsageError(null, `unrecognized arguments: ${extra.join(" ")}`);
+  // py: extras 由**顶层**解析器报（`parse_args` 的 `unrecognized arguments: %s`）
+  if (extras.length > 0) {
+    // 顶层：交给 main 在子解析器跑完（且没报错）之后再报 —— 见 `Parsed.extras` 的说明。
+    if (subArgv !== undefined) return { values, positionals: positionalsOut, help: false, subArgv, extras };
+    throw new UsageError(null, `unrecognized arguments: ${extras.join(" ")}`);
   }
-  if (positionals.length > spec.pos.length) {
-    throw new UsageError(null, `unrecognized arguments: ${positionals.slice(spec.pos.length).join(" ")}`);
-  }
-  // 缺位置参数：按 spec 顺序逐个填，缺的报 required
-  const missing = spec.pos.filter((_, idx) => idx >= positionals.length).map((p) => p.name);
-  if (missing.length > 0) {
-    throw new UsageError(spec.name, `the following arguments are required: ${missing.join(", ")}`);
-  }
-  const typed: (string | number)[] = positionals.map((v, idx) => {
-    const p = spec.pos[idx];
-    return p.kind === "int" ? parseIntArg(spec.name, p.name, String(v)) : v;
-  });
-  return { values, positionals: typed, help };
+  return { values, positionals: positionalsOut, help: false, subArgv };
 }
 
 // ---------- 入口 ----------
@@ -445,29 +742,35 @@ export function main(argv: string[], io: CliIO = stdIo, env: q.QueryEnv = q.quer
   const width = textWidth();
   const topUsage = usageText("zgmem", null, width);
 
-  if (argv.length === 0) {
-    return fail(io, topUsage, null, "the following arguments are required: cmd");
+  // py:顶层解析器也走这同一套端口（`cmd` 是 nargs='PARSER' 的位置参数）——`--hel`（缩写）、
+  // `-hx`（短选项拼 explicit arg）、`--hel=x`（ignored explicit argument）、`--`（分隔符，
+  // 被吃掉再把剩余交给子解析器）、`-`（invalid choice）全由此保证，不再手写特判。
+  let top: Parsed;
+  try {
+    top = parseCmd(TOP_SPEC, argv);
+  } catch (e) {
+    if (e instanceof UsageError) {
+      // 顶层报错统一用顶层 usage + `zgmem: error:`（顶层 UsageError 的 cmd 是 `zgmem` 或 null）
+      return fail(io, topUsage, null, e.message);
+    }
+    throw e;
   }
-  if (argv[0] === "-h" || argv[0] === "--help") {
+  if (top.help) {
     io.out(helpText("zgmem", null, width));
     return 0;
   }
-  if (argv[0].startsWith("-")) {
-    return fail(io, topUsage, null, `unrecognized arguments: ${argv[0]}`);
-  }
-  const cmdName = argv[0];
-  if (!CMD_NAMES.includes(cmdName)) {
-    const list = CMD_NAMES.map((c) => `'${c}'`).join(", ");
-    return fail(io, topUsage, null, `argument cmd: invalid choice: '${cmdName}' (choose from ${list})`);
-  }
+  // 走到这里说明 cmd 已过 choices 校验（缺 `cmd` / 非法名在 `parseCmd` 里就已经报了）
+  const cmdName = String(top.values["cmd"]);
+  const subArgv = top.subArgv ?? [];
   const spec = cmdOf(cmdName);
   const prog = `zgmem ${cmdName}`;
 
   let parsed: Parsed;
   try {
-    parsed = parseCmd(spec, argv.slice(1));
+    parsed = parseCmd(spec, subArgv);
   } catch (e) {
     if (e instanceof UsageError) {
+      // extras（`unrecognized arguments`）由**顶层** usage 报：py 里子解析器不报它
       const usage = e.cmd === null ? topUsage : usageText(prog, spec, width);
       return fail(io, usage, e.cmd === null ? null : prog, e.message);
     }
@@ -476,6 +779,10 @@ export function main(argv: string[], io: CliIO = stdIo, env: q.QueryEnv = q.quer
   if (parsed.help) {
     io.out(helpText(prog, spec, width));
     return 0;
+  }
+  // py: 顶层 `parse_args` 的 extras 检查（子解析器没报错才轮到）——用**顶层** usage
+  if (top.extras && top.extras.length > 0) {
+    return fail(io, topUsage, null, `unrecognized arguments: ${top.extras.join(" ")}`);
   }
 
   const v = parsed.values;
@@ -490,6 +797,22 @@ export function main(argv: string[], io: CliIO = stdIo, env: q.QueryEnv = q.quer
 
   // py: use_workspace(ws) —— 非法/未初始化时 SystemExit(msg) → stderr + exit 1
   const loadScope = (name: string): q.Scope => q.loadScope(name, env.home, env.hitRefine);
+  // py: main() 里的 `if ws and ws != "all": use_workspace(ws)` —— **分发前**校验显式 workspace：
+  // 非法名 / 未初始化 → SystemExit 未被捕获 → stderr + exit 1。
+  // 缺省 scope（env ZGMEM_SCOPE / 派生值）与 'all' **不走**这一步 —— 那时各 cmd_* 用宽容 scope
+  // 自行降级（query 打报错文本到 stdout、show/ctx 打 unknown session，均 rc0）。
+  // 少了这一步，`query foo --workspace nope` 会退化成 stdout + rc0（cmd_query 内层 try 的口径）。
+  if (ws && ws !== "all") {
+    try {
+      loadScope(ws);
+    } catch (e) {
+      if (e instanceof q.ScopeExit) {
+        io.err(`${e.message}\n`);
+        return 1;
+      }
+      throw e;
+    }
+  }
 
   let res: { out: string; code: number };
   try {
@@ -510,12 +833,21 @@ export function main(argv: string[], io: CliIO = stdIo, env: q.QueryEnv = q.quer
           env,
         );
         break;
-      case "refresh":
-        res = r.runRefresh(loadScope(ws || env.scopeName), {
+      case "refresh": {
+        // py: cmd_refresh **忽略** args.workspace，用的是模块全局（main() 刚切过的那个）。
+        // 两层职责的后果：`refresh --workspace ws-b` 刷的是 ws-b（main() 改了全局），
+        // 而缺省 scope 与 `refresh --workspace all` / `--workspace ""` 都跳过前置校验 → 回落到
+        // **缺省** scope，并且是**宽容**的那份（import 期的空 manifest，见 q.defaultScope）。
+        // 少了这条，`ZGMEM_SCOPE=<没建过的 ws> refresh` 在 Python 里是 `no sessions dir` + rc0，
+        // 在 TS 里会变成 stderr + rc1（差分模糊测试 74/20847 例全砸在这一处）。
+        const scope =
+          ws && ws !== "all" ? loadScope(ws) : q.defaultScope(env.home, env.scopeName, env.hitRefine);
+        res = r.runRefresh(scope, {
           sessionsDir: v["sessions_dir"] as string | null,
           embedding: env.embedding,
         });
         break;
+      }
       case "show":
         res = q.runShow(String(pos[0]), pos[1] as number, v["full"] as boolean, ws, env);
         break;

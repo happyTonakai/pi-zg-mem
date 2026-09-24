@@ -19,6 +19,13 @@
  *  2. `SystemExit(msg)` → `ScopeExit`。语义差别只在**谁**处理：Python 在 fan-out 里
  *     `except SystemExit` 吞掉继续下一个 workspace；顶层不捕获 → stderr + 退出码 1。
  *     这里同样把 ScopeExit 抛给调用方，由模块 E 决定落地到 stderr / exit 1。
+ *     **但「谁处理」分成两层，不能混**（Python 靠 `main()` 与各 `cmd_*` 分工；
+ *     漏掉哪一层都会与 Python 分叉，详见 `loadScope` / `defaultScope` 的注释）：
+ *      - **显式** `--workspace <名>`：`main()` 在**分发前**就 `use_workspace(ws)` 校验，
+ *        非法名 / 未初始化 → 未捕获的 `SystemExit` → **stderr + rc1**（模块 E 复刻这一步）；
+ *      - **缺省** scope（env `ZGMEM_SCOPE` / 派生值）与 `--workspace all`：`main()` **不**校验，
+ *        `cmd_*` 用的是 import 期那份**宽容**的全局（manifest 缺失 = 空 manifest）→ 正常 rc0，
+ *        例如 show/ctx 打 `unknown session <id>`、query 打 use_workspace 的报错文本（都是 stdout + rc0）。
  *  3. Python 在 import 时读环境变量（ZGMEM_DIR / ZGMEM_SCOPE / ZGMEM_HIT_REFINE …），
  *     这里收进 `queryEnv(env)` 显式传参，测试可注入而不必重启进程（语义不变：默认仍取 process.env）。
  *
@@ -81,7 +88,29 @@ export function pyStr(v: unknown): string {
   return String(v); // list/dict 的 repr 不在此复刻：真实输入里 role/ts/line 不会是容器
 }
 
-/** py: repr(v) —— 仅用于错误信息（`{ws!r}`）。非可打印字符按 \xXX 转义的那套没复刻。 */
+/**
+ * CPython `Py_UNICODE_ISPRINTABLE`（`str.isprintable()` / `repr()` 共用）：
+ * Cc/Cf/Cs/Co/Cn/Zl/Zp/Zs 均不可打印，只有 ASCII 空格例外。
+ * 已有差异：本机 Python 3.14 带 Unicode 16.0、Node 24 带 Unicode 17.0，
+ * 故“16 里仍是 Cn、17 里已分配”的码点（共 4803 个、47 个极大连续段，如 U+088F）这边会当成可打印原样输出，
+ * 而 Python 会转义成 \u088f。规则本身一致（反向误转义 0 个），差的是 Unicode 版本表。
+ */
+const PY_NON_PRINTABLE = /[\p{Cc}\p{Cf}\p{Cs}\p{Co}\p{Cn}\p{Zl}\p{Zp}\p{Zs}]/u;
+
+function pyIsPrintable(ch: string): boolean {
+  return ch === " " || !PY_NON_PRINTABLE.test(ch);
+}
+
+/** py: repr() 对不可打印字符的转义形式：≤\xff → \xhh，≤\xffff → \uxxxx，否则 \Uxxxxxxxx。 */
+function pyEscapeUnprintable(ch: string): string {
+  const cp = ch.codePointAt(0) ?? 0;
+  const hex = cp.toString(16);
+  if (cp <= 0xff) return `\\x${hex.padStart(2, "0")}`;
+  if (cp <= 0xffff) return `\\u${hex.padStart(4, "0")}`;
+  return `\\U${hex.padStart(8, "0")}`;
+}
+
+/** py: repr(v) —— 仅用于错误信息（`{ws!r}`）。 */
 export function pyRepr(v: unknown): string {
   if (v === null || v === undefined) return "None";
   if (typeof v !== "string") return pyStr(v);
@@ -93,6 +122,7 @@ export function pyRepr(v: unknown): string {
     else if (ch === "\r") body += "\\r";
     else if (ch === "\t") body += "\\t";
     else if (ch === q) body += `\\${ch}`;
+    else if (!pyIsPrintable(ch)) body += pyEscapeUnprintable(ch);
     else body += ch;
   }
   return `${q}${body}${q}`;
@@ -197,6 +227,99 @@ const PY_WS: ReadonlySet<number> = new Set([
   0x2028, 0x2029, 0x202f, 0x205f, 0x3000,
 ]);
 
+/**
+ * Python `int()` **自己那套**空白表 —— 与 `PY_WS` 不同：`str.strip()` 会把 \x1c-\x1f
+ * 当空白剥掉，`int()` 却拒收（`int("\x1c3")` 抛 ValueError）。用探测法在 0x110000 全域
+ * 上枚举得到恰好 25 个码点。
+ */
+const PY_INT_WS: ReadonlySet<number> = new Set([
+  0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x20, 0x85, 0xa0, 0x1680,
+  ...Array.from({ length: 0x200b - 0x2000 }, (_, i) => 0x2000 + i),
+  0x2028, 0x2029, 0x202f, 0x205f, 0x3000,
+]);
+
+/**
+ * Unicode `Nd`（decimal digit）的 **10 连跑起点表**。CPython 的
+ * `_PyUnicode_TransformDecimalAndSpaceToASCII` 按 `unicodedata.decimal()`（即 Nd 属性）
+ * 把非 ASCII 数字映射成 ASCII 数字，所以 `int("٣")` / `int("１２")` / `int("𝟎𝟏")` 都合法。
+ * Nd 共 760 个码点：物理上 71 段（其中 U+116D0 长 20、U+1D7CE 长 50），按 10 切分共 76 个子段，段内 `cp - start` 即数字值
+ * （与 `unicodedata.decimal` 全量比对：0 处不符）。刻意不用正则 `\p{Nd}`：那要 `u` 标志、
+ * 且依赖 JS 引擎的 Unicode 版本，而这里是逐字节对拍的判定点。
+ */
+const ND_RUN_STARTS: readonly number[] = [
+  0x30, 0x660, 0x6f0, 0x7c0, 0x966, 0x9e6, 0xa66, 0xae6, 0xb66, 0xbe6,
+  0xc66, 0xce6, 0xd66, 0xde6, 0xe50, 0xed0, 0xf20, 0x1040, 0x1090, 0x17e0,
+  0x1810, 0x1946, 0x19d0, 0x1a80, 0x1a90, 0x1b50, 0x1bb0, 0x1c40, 0x1c50, 0xa620,
+  0xa8d0, 0xa900, 0xa9d0, 0xa9f0, 0xaa50, 0xabf0, 0xff10, 0x104a0, 0x10d30, 0x10d40,
+  0x11066, 0x110f0, 0x11136, 0x111d0, 0x112f0, 0x11450, 0x114d0, 0x11650, 0x116c0, 0x116d0,
+  0x116da, 0x11730, 0x118e0, 0x11950, 0x11bf0, 0x11c50, 0x11d50, 0x11da0, 0x11f50, 0x16130,
+  0x16a60, 0x16ac0, 0x16b50, 0x16d70, 0x1ccf0, 0x1d7ce, 0x1d7d8, 0x1d7e2, 0x1d7ec, 0x1d7f6,
+  0x1e140, 0x1e2f0, 0x1e4f0, 0x1e5f1, 0x1e950, 0x1fbf0,
+];
+
+/** Nd 码点到 0..9；非 Nd 返回 -1。 */
+function ndDigit(cp: number): number {
+  let lo = 0;
+  let hi = ND_RUN_STARTS.length - 1;
+  let hit = -1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (ND_RUN_STARTS[mid] <= cp) {
+      hit = mid;
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  if (hit < 0) return -1;
+  const v = cp - ND_RUN_STARTS[hit];
+  return v < 10 ? v : -1;
+}
+
+/**
+ * py: `int(s)` 的十进制解析（基数字符串部分）。成功返回值，失败返回 null。
+ * 规则（全部按 CPython 实测）：两端可带 `int()` 认的空白；可有单个 `+`/`-`；
+ * 数字为 Nd（含非 ASCII）；`_` 只能夹在两个数字之间且不能连续；数字后只允许空白。
+ */
+function pyIntFromString(s: string): number | null {
+  const arr = Array.from(s);
+  let lo = 0;
+  let hi = arr.length;
+  while (lo < hi && PY_INT_WS.has(arr[lo].codePointAt(0) ?? 0)) lo += 1;
+  while (hi > lo && PY_INT_WS.has(arr[hi - 1].codePointAt(0) ?? 0)) hi -= 1;
+
+  const cps: number[] = [];
+  for (let k = lo; k < hi; k += 1) cps.push(arr[k].codePointAt(0) ?? 0);
+
+  let i = 0;
+  let neg = false;
+  if (cps[i] === 0x2b || cps[i] === 0x2d) {
+    neg = cps[i] === 0x2d;
+    i += 1;
+  }
+
+  const digits: string[] = [];
+  let expectDigit = true;
+  for (; i < cps.length; i += 1) {
+    const d = ndDigit(cps[i]);
+    if (d >= 0) {
+      digits.push(String(d));
+      expectDigit = false;
+      continue;
+    }
+    // 下划线：必须夹在数字之间（前一个已读到数字、后一个也是数字），且不能连续。
+    if (cps[i] === 0x5f && !expectDigit && ndDigit(cps[i + 1] ?? -1) >= 0) {
+      expectDigit = true;
+      continue;
+    }
+    return null;
+  }
+  if (expectDigit) return null; // 空串、只有符号、或以 `_` 结尾
+  const n = Number(digits.join(""));
+  // `int("-0")` 是 0（不是 -0）：JS 的 `Number("-0")` 会留符号位，这里抹平。
+  return n === 0 ? 0 : neg ? -n : n;
+}
+
 /** py: s.strip() —— 只剥 Python 认的那批空白码点。 */
 export function pyStrip(s: string): string {
   const arr = Array.from(s);
@@ -221,7 +344,7 @@ class PyIntError extends Error {
   }
 }
 
-/** py: int(v) —— 只接受 bool / int|float / str；ASCII 数字、可用下划线分隔。 */
+/** py: int(v) —— 只接受 bool / int|float / str；数字含全部 Nd（非 ASCII 数字也认）。 */
 export function pyInt(v: unknown): number {
   if (typeof v === "boolean") return v ? 1 : 0;
   if (typeof v === "number") {
@@ -230,10 +353,9 @@ export function pyInt(v: unknown): number {
     return Math.trunc(v);
   }
   if (typeof v === "string") {
-    if (!/^[+-]?\d(?:_?\d)*$/.test(pyStrip(v))) {
-      throw new PyIntError("ValueError", `invalid literal for int() with base 10: '${v}'`);
-    }
-    return Number(pyStrip(v).replace(/_/g, ""));
+    const n = pyIntFromString(v);
+    if (n === null) throw new PyIntError("ValueError", `invalid literal for int() with base 10: '${v}'`);
+    return n;
   }
   throw new PyIntError("TypeError", `int() argument must be a string or a number, not '${pyTypeName(v)}'`);
 }
@@ -341,6 +463,27 @@ export function loadScope(ws: string, home: string, refineHits: boolean = hitRef
     corpusDir: path.join(home, ws, "corpus"),
     manifestPath: mpath,
     manifest: zc.loadManifest(mpath),
+    refineHits,
+  };
+}
+
+/**
+ * py: **import 期**的三个全局初值 —— `SCOPE_DIR = _derive_workspace()` 之后紧跟
+ * `MANIFEST = zc.load_manifest(_mpath)`，而 `load_manifest` 对**缺失 / 损坏 / 旧版本**一律返回空
+ * manifest（zgmem_corpus.py:71-84）。也就是说缺省 scope 是**宽容**的：不校验目录、不校验存在性。
+ * 只有 `use_workspace()`（= 这里的 `loadScope`）才会报「未初始化」。
+ *
+ * 少了这条，`ZGMEM_SCOPE=没建过的ws … show sessA 1` 在 Python 里是 `unknown session sessA` + rc0，
+ * 在 TS 里会变成 stderr + rc1 —— 对拍台 `cli_differential.ts` 会红。
+ */
+export function defaultScope(home: string, name: string, refineHits: boolean = hitRefineEnabled()): Scope {
+  const manifestPath = path.join(home, name, "manifest.json");
+  return {
+    name,
+    home,
+    corpusDir: path.join(home, name, "corpus"),
+    manifestPath,
+    manifest: zc.loadManifest(manifestPath),
     refineHits,
   };
 }
@@ -466,7 +609,12 @@ export function rgCandidates(
   });
   // 为什么不先 return []：rg 输出超限时 spawnSync 给的是 error=…MAXBUFFER（message 里带 ENOBUFS）
   // + status=null，当成“没命中”就变成了静默错答案（真机全量 rg 早就过 1 MiB 了）。
-  // 包一层只为可读：裸抛 proc.error 在 CLI 侧就是一句 `spawnSync rg ENOBUFS`；cause 保留原始 error。
+  // 为什么包一层而不是裸抛 proc.error：**这条路径在 Python 侧不存在**——
+  // zgmem.py:349 的 subprocess.run(capture_output=True) 没有 maxBuffer 概念，读多少都不会 ENOBUFS。
+  // 所以这里没有“逐字节对拍”可参考的文案，包一句人话（带 cause）只是提高可诊断性。
+  // 注意别把它当 rg 自身的失败处理：rg 退 2 仍在下一行 `return []`（与 zgmem.py:350 逐字一致，见
+  // docs/plan-ts-migration.md「已知残余差异」）；而 rg 真正缺失(ENOENT)时 Python 同样是未捕获
+  // traceback，所以这里也保持未捕获，只是不同 runtime 的 traceback 本就不可比。
   if (proc.error) {
     throw new Error(`rg 子进程失败（输出超过 maxBuffer？）: ${proc.error.message}`, { cause: proc.error });
   }
@@ -726,7 +874,8 @@ export function runShow(
   ws?: string | null,
   env: QueryEnv = queryEnv(),
 ): RunResult {
-  const scope = loadScope(ws || env.scopeName, env.home, env.hitRefine);
+  // 显式 --workspace → 严格（模块 E 已前置校验，这里同一口径）；缺省 scope → 宽容，见 defaultScope
+  const scope = ws ? loadScope(ws, env.home, env.hitRefine) : defaultScope(env.home, env.scopeName, env.hitRefine);
   const jpath = jsonlPathFor(scope, sessionId);
   if (!jpath) return { out: `unknown session ${sessionId}\n`, code: 0 };
   // 从分片语料定位 jsonl 行号
@@ -770,7 +919,8 @@ export function runCtx(
   ws?: string | null,
   env: QueryEnv = queryEnv(),
 ): RunResult {
-  const scope = loadScope(ws || env.scopeName, env.home, env.hitRefine);
+  // 显式 --workspace → 严格；缺省 scope → 宽容，见 defaultScope
+  const scope = ws ? loadScope(ws, env.home, env.hitRefine) : defaultScope(env.home, env.scopeName, env.hitRefine);
   const jpath = jsonlPathFor(scope, sessionId);
   if (!jpath) return { out: `unknown session ${sessionId}\n`, code: 0 };
   const rec = corpusRow(scope, sessionId, corpusLine);
@@ -849,5 +999,9 @@ export function runSessions(ws?: string | null, env: QueryEnv = queryEnv()): Run
     }
     return { out, code: 0 };
   }
-  return { out: dump(loadScope(ws || env.scopeName, env.home, env.hitRefine)), code: 0 };
+  // 显式 --workspace → 严格；缺省 scope → 宽容（Python 里是空 manifest → 什么都不打印, rc0）
+  return {
+    out: dump(ws ? loadScope(ws, env.home, env.hitRefine) : defaultScope(env.home, env.scopeName, env.hitRefine)),
+    code: 0,
+  };
 }

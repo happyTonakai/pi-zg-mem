@@ -121,6 +121,52 @@ function writeFile(p: string, body: string): void {
 
 const SEG_LIMITS = (rows: number): zc.SegLimits => ({ rows, bytes: 64 * 1024 });
 
+// ---------- 已知残余差异的常驻守卫：非标准 JSON 字面量 ----------
+
+/**
+ * A3（第三轮评审：Module G 删掉 Python 后零守卫的静默错答案）。
+ *
+ * Python 的 `json.loads` 默认接受 `NaN` / `Infinity` / `-Infinity`（JS 的 `JSON.parse` 拒绝），
+ * 于是这三个字面量成为**已记录的残余差异**（docs/plan-ts-migration.md「已知残余差异」）：
+ *   - 只含 `NaN` 的行：Python `int(nan)` 抛 ValueError → 被 row_of 的 `except (TypeError, ValueError)`
+ *     兜住 → **该行以 `ts=0` 收进语料**；TS 侧 `JSON.parse` 直接抛 → rowOf 返回 null → **丢行**。
+ *   - 含 `±Infinity` 的行：Python `int(inf)` 抛 OverflowError（**不在** except 内）→ **整个 session 回滚**；
+ *     TS 侧同样只丢这一行，session 照常成功。
+ *   两侧都 exit 0（所以我们说的“静默”是真的静默）。
+ *
+ * 不修的理由：真实 pi 写 JSONL 用标准编码器，永不产生这三个字面量（172.5MB 真实语料差分 0 差异）。
+ * 本用例钉的是 TS 的**现状**：G 之后这三类字面量再无别的守卫，改动这里必须先改那段文档。
+ */
+test("nonstandard_json_literals_drop_only_the_line (A3)", () => {
+  withBase((b) => {
+    const rawTs = (ts: string, text: string): string =>
+      `{"type":"message","message":{"role":"user","timestamp":${ts},"content":[{"type":"text","text":"${text}"}]}}`;
+    const p = path.join(b.sessions, "nonstd.jsonl");
+    writeFile(
+      p,
+      [
+        rawTs("NaN", "NAN_MARKER"),
+        msgLine("user", "正常一条"),
+        rawTs("-Infinity", "NEG_INF_MARKER"),
+        rawTs("Infinity", "INF_MARKER"),
+        msgLine("assistant", "正常两条"),
+      ].join("\n") + "\n",
+    );
+
+    const man = zc.emptyManifest();
+    // Python 侧 ±Infinity 会让整个 session 失败（CLI 退出码 2 + 整轮回滚）；TS 只丢行 → 不缺不抛，
+    // 所以“process 没抛异常 + 摘要里还是 2 msgs”就是“session 照常成功”的可观测证据。
+    const { status } = b.process(p, man);
+    assert.match(status, /2 msgs/, `TS 不会因 ±Infinity 回滚整个 session（与 Python 的差异之一）: ${status}`);
+    const rows = zc.sessionRowsFull(b.corpus, man, "nonstd");
+    assert.deepEqual(
+      rows.map((r) => r.text),
+      ["正常一条", "正常两条"],
+      "三个非标准字面量的行全部被 JSON.parse 拒绝丢弃（Python 侧 NaN 行会以 ts=0 留下）",
+    );
+  });
+});
+
 // ---------- H1 ----------
 // py: TestH1SeqAllocator.test_long_session_gets_all_fragments_into_manifest
 // 另外两条 seq_allocator 用例已在 tests/corpus.test.ts（模块 A）覆盖。

@@ -282,7 +282,8 @@ argparse 兼容的 CLI 前端，`lib/cli.ts` 545 行，入口 `if (import.meta.m
 
 原计划写的「改为进程内导入」有两个问题，实测后改选：
 
-1. **lib 是同步实现**（15 处 `spawnSync`，忠于 Python 的 `subprocess.run`）。进程内直调会占住 pi 的
+1. **lib 是同步实现**（3 处 `spawnSync`：`lib/query.ts` 的 rg/zg 各一、`lib/refresh.ts` 的 zg，忠于 Python 的
+   `subprocess.run`；`zgmem.py` 侧是 4 处 `subprocess.run`：210/267/349/483）。进程内直调会占住 pi 的
    event loop → TUI 冻结。
 2. 即便不看同步：刷新的触发点是 `agent_settled`，**每轮会话结束都会跑**，而真实语料（83MB / 250 分片）上
    冷 `zg index` 实测 **5.7s**（无变化 0.5s；hybrid 查询 1.1s；rg 查询 0.08s）。
@@ -340,6 +341,16 @@ README 里 `python3` 的残留（含「需要 `python3` 在 PATH 上」这条前
 
 ### 已知残余差异（已记录，**不修**）
 
+- **`repr()` 对“Python 16 未分配、Node 17 已分配”码点的转义**：`int()` 收 Unicode 十进制数字（Nd）
+  那部分是**已修**的（`query.pyInt` 是全量 Nd 表 + `int()` 自己的空白表，1122 例对拍 0 差异）；
+  但错误信息里的 `%(value)r`（`repr()`）要按 `str.isprintable()` 决定是否转义，而本机
+  Python 3.14 带 Unicode 16.0、Node 24 带 Unicode 17.0：**17 里新分配而 16 里仍是 Cn 的 4803 个码点
+  （47 个极大连续段，如 U+088F）**，Python 会输出 `\u088f`、TS 原样输出。不修的理由：没人会把这些
+  码点打进 argv，而且这个差异随“用哪个 Python”变动（跑 Python 17 的一方就会和 TS 一致）；
+  规则本身已全量核过：TS 侧“误转义”（该原样却转义）**0 个**，差异全部落在 Python 16 的 Cn 上。
+  对照组：常见不可打印字符（`\x1c`、`\x7f`、NBSP、U+2028、U+3000、引号/反斜杠/`\n\r\t`）
+  逐字节一致，差分用例见 `tests/differential/cli_differential.ts` 的 `arg/int-{file-separator,nbsp,del,line-sep}`。
+
 - **非标准 JSON 字面量 `NaN` / `Infinity` / `-Infinity`**：Python `json.loads` 默认接受这三个字面量，
   JS `JSON.parse` 拒绝。实测（只有 `NaN` 的行）：Python 把该行以 `ts=0` 收进语料，TS 直接丢行，
   **两侧都 exit 0**（静默丢一行）；带 `±Infinity` 时 Python `int(inf)` 抛 `OverflowError`（不在
@@ -347,6 +358,8 @@ README 里 `python3` 的残留（含「需要 `python3` 在 PATH 上」这条前
   不修的理由：真实 pi 写 JSONL 用的是标准编码器，永不产生这三个字面量 —— 172.5MB 真实语料差分
   **0 差异**就是证据；要忠实复刻还得把“Python 因 Infinity 整个 session 失败”这个本身就别扭的行为
   一并搬过来，代价大于收益。**若哪天上游真的产生这类行，此处是第一个要动的地方。**
+  回归用例（钉住 TS 侧现状）见 `tests/etl.test.ts:nonstandard_json_literals_drop_only_the_line`（A3）；
+  改上述任何一侧行为，都要同时改用例和这里。
 
 - **rg 子进程非零退出时会丢掉全部候选**：`lib/query.ts:rgCandidates` 在 `proc.status !== 0` 时直接
   `return []`（只 `proc.error` 例外，即 ENOBUFS/ENOENT 这类真正的启动失败）—— 所以某个 `jsonl_path`
@@ -355,6 +368,21 @@ README 里 `python3` 的残留（含「需要 `python3` 在 PATH 上」这条前
 - **`--workspace all` 扇出时静默丢失败 workspace**：`lib/query.ts` 里某个 workspace 的 `zg` 非零退出
   被 `continue` 跳过，它的 stderr 不进结果，于是“某个 workspace 坏了”与“它没命中”在输出上不可分。
   同样忠于 Python。
+
+### TS 独有、Python 无法对拍的路径（可选处理）
+
+这些路径在 Python 侧**根本不存在**，所以“逐字节对拍”对它们没有约束力，只能自己拍板：
+
+- **`ENOBUFS`（rg 输出超过 maxBuffer）**：Python 的 `subprocess.run(capture_output=True)` 无
+  maxBuffer 概念，读多少都不会失败；Node `spawnSync` 默认 1 MiB 且失败时给 `status=null`，
+  当“没命中”就成了静默错答案（真机全量 rg 早已过 1 MiB）。处理=默认提到 256 MiB
+  （`lib/corpus.ts:subprocessMaxBuffer()`，env `ZGMEM_SUBPROCESS_MAX_BUFFER` 可覆盖，且**每次调用重读**），
+  并在 `lib/query.ts:rgCandidates` 里把 `proc.error` 抛成带 cause 的清晰错误（保持未捕获，与 Python
+  对 `rg` 缺失时的未捕获 traceback 行为同构；只是文案不同）。回归用例见
+  `tests/query.test.ts:rgCandidates.raises_on_maxbuffer_instead_of_silently_returning_nothing`（同时钉住默认值 > 1 MiB）。
+- **父进程/子进程两套 maxBuffer 字面量**：`extensions/zg-memory/index.ts` 不 import `lib`（边界约定），
+  所以 `runLib`/`zgIndex` 里只能重复写 256 MiB；已知残余：`ZGMEM_SUBPROCESS_MAX_BUFFER` 调到 256 MiB 以上时，
+  子进程能产出而父进程会拒（反向不对称，仅测试钩子场景会碰到）。
 
 ### 未迁移的 Python 用例（清单，避免被当成已迁移）
 

@@ -69,12 +69,13 @@ jobs:
           set -o pipefail
           node --experimental-strip-types --test --test-reporter=tap | tee /tmp/ts-test.tap
           # 发现即失败：用例文件被改名/移走时 node 会以 0 用例 exit 0，必须显式兜底。
-          # 当前 68 个；低于 68 直接红（删掉任何一个用例都会破这条下限，包括 6 个运行时边界用例）。
-          # 加用例时记得同步 bump 这个数字。
+          # 当前 71 个；用 pass+skipped 于是 root 环境下 refresh.test.ts 的 skip（见 refresh.test.ts:280-283）
+          # 不会把 CI 拉红（普通 runner 上 skipped=0）。加用例时记得同步 bump 这个数字。
           # （--test-reporter=tap 是必须的：node22 默认 TAP、
           # node24 默认 spec，不锁 reporter 这个 grep 会在 22 上失效）
           pass=$(grep -E '^# pass [0-9]+' /tmp/ts-test.tap | tail -1 | awk '{print $3}')
-          test "${pass:-0}" -ge 68
+          skipped=$(grep -E '^# skipped [0-9]+' /tmp/ts-test.tap | tail -1 | awk '{print $3}')
+          test "$(( ${pass:-0} + ${skipped:-0} ))" -ge 71
 
       # 把迁移计划里的两条硬约束变成 CI 断言，而不是靠人记得：
       #   1. 只用可擦除语法 —— 每个模块都要能被 node 直接解析执行（无 enum/namespace/装饰器）
