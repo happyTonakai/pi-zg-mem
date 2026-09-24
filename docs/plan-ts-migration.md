@@ -57,7 +57,7 @@ Python 在**全部门类通过验收前不删**。`index.ts` 按命令逐条切�
    改动样本必须手工重算期望字节并逐字节 review diff。
 2. **测试逐条对等（永久保留）**
    `tests/test_zgmem.py` 的 25 个用例（清单见下）已按名字一一迁到 `tests/*.test.ts`
-   （`unittest` → `node:test`）。**用例数只许多不许少** —— 实际多出不少（TS 侧当前 76 个）。
+   （`unittest` → `node:test`）。**用例数只许多不许少** —— 实际多出不少（TS 侧当前 77 个）。
    原文件已随 G 删除。
 3. **差分对拍（迁移期一次性证据，已随 G 删除）**
    对同一批输入分别跑 Python 与 TS，比对产物字节级一致；并在**真实语料**上跑
@@ -365,7 +365,7 @@ F 之后 `index.ts` 与 lib 之间只剩 argv 送达这一件事，已由上面�
 验收对照：
 
 - [x] `find . -name '*.py'`（排除 node_modules）为空
-- [x] `tsc --noEmit` 0 错误；TS 套件 76 用例全绿（删掉的差分脚本本就不在 CI 里）
+- [x] `tsc --noEmit` 0 错误；TS 套件 77 用例全绿（删掉的差分脚本本就不在 CI 里）
 - [x] `ci.yml` 不再引用 Python，只剩 `ts-tests` 与 `typecheck` 两个 job
 - [x] 冻结的黄金样本仍逐字节通过（证明删生成器不影响回归强度）
 
@@ -431,7 +431,7 @@ F 之后 `index.ts` 与 lib 之间只剩 argv 送达这一件事，已由上面�
 - [x] `TestH2HitRefinement.test_refine_hit_line_end_to_end` —— 已迁入 `tests/query.test.ts`（模块 C，超出原名用例）
 - [x] `TestM2IndexRefresh.*`（9 条，`test_zgmem.py:332-598`）—— 已按原名迁入 `tests/refresh.test.ts`（模块 D）
 
-**结论：`test_zgmem.py` 的 25 条已全部迁完**（TS 侧另有新增用例，当前共 76 个）；原文件已随模块 G 删除。
+**结论：`test_zgmem.py` 的 25 条已全部迁完**（TS 侧另有新增用例，当前共 77 个）；原文件已随模块 G 删除。
 
 ### 测试/CI 缺口（三轮 reviewer 记录）
 
@@ -453,6 +453,13 @@ F 之后 `index.ts` 与 lib 之间只剩 argv 送达这一件事，已由上面�
   **端到端链路改由 `tests/runtime_boundary.test.ts` 常驻守着（不需要 Python）。**
 - **CI 里已无任何 Python**：原 `tests` job（25 个 py 用例）与 `pipeline` job（ETL → refresh 全链路）
   都是迁移期的 Python 侧证据，已随 G 删除；保留的是 TS 套件 + typecheck + ETL CLI 真进程步骤。
+- **CI runner 不带 ripgrep（G 推送时才发现）**：模块 C 引入的 10 个 rg 召回链路用例依赖 PATH 上
+  有真 `rg`，而 `ubuntu-latest` / `macos-latest` 镜像都没有 —— 这些提交自模块 C 起一直只在本地跑过，
+  直到 G 推送到远端才首次上 CI（`spawnSync rg ENOENT` × 10）。处理：`ts-tests` job 增加
+  `Install ripgrep` 步骤（Linux 走 apt、macOS 走 brew），不改成“缺 rg 就 skip”—— 那等于把
+  召回链路的 CI 覆盖静默丢掉；顺手把 `lib/query.ts:rgCandidates` 的启动层报错文案区分
+  ENOENT / ENOBUFS（旧文案只提 maxBuffer，会把人往错方向引），断言见
+  `tests/query.test.ts:rgCandidates.missing_rg_is_reported_as_enoent_not_maxbuffer`。
 
 > **黄金样本盲区（未修，已知）**：`tests/etl.test.ts` 的黄金样本只对「Python 序列化出来的 manifest 文件」
 > 换成 `__SESSIONS_DIR__` 占位符后整字节比对，因此**只在 Python 写过那些键上生效**：若 TS 侧多写一个

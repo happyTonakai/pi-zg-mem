@@ -616,7 +616,11 @@ export function rgCandidates(
   // docs/plan-ts-migration.md「已知残余差异」）；而 rg 真正缺失(ENOENT)时 Python 同样是未捕获
   // traceback，所以这里也保持未捕获，只是不同 runtime 的 traceback 本就不可比。
   if (proc.error) {
-    throw new Error(`rg 子进程失败（输出超过 maxBuffer？）: ${proc.error.message}`, { cause: proc.error });
+    // 区分两种启动层失败，免得看板报的信息把人往错的方向引（CI 上就踩过一次：
+    // runner 没装 ripgrep 时 message 里只有 ENOENT，旧文案却只提 maxBuffer）。
+    const code = (proc.error as NodeJS.ErrnoException).code;
+    const why = code === "ENOENT" ? "PATH 上找不到 rg" : code === "ENOBUFS" ? "输出超过 maxBuffer" : code ?? "启动失败";
+    throw new Error(`rg 子进程失败（${why}）: ${proc.error.message}`, { cause: proc.error });
   }
   if ((proc.status ?? -1) !== 0) return [];
 

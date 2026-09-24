@@ -240,6 +240,25 @@ test("rgCandidates.raises_on_maxbuffer_instead_of_silently_returning_nothing", (
 });
 
 /**
+ * rg 根本不在 PATH 上时（CI runner 默认就没装 ripgrep，踩过一次），报错必须指向“找不到 rg”
+ * 而不是误导性的 maxBuffer。行为上仍是显式抛（与 Python 对 rg 缺失时的未捕获 traceback 同构）。
+ */
+test("rgCandidates.missing_rg_is_reported_as_enoent_not_maxbuffer", () => {
+  const { scopeA } = buildFixture();
+  const old = process.env.PATH;
+  process.env.PATH = ""; // 让 spawnSync 无论如何都找不到 rg
+  try {
+    assert.throws(
+      () => q.rgCandidates(scopeA, { query: MARKER }, 5, "ws-a"),
+      (e: unknown) => /PATH 上找不到 rg/.test(String((e as Error)?.message ?? "")),
+      "缺 rg 时的报错要直接说找不到 rg",
+    );
+  } finally {
+    process.env.PATH = old;
+  }
+});
+
+/**
  * A1（第三轮评审：Module G 删掉 Python 后零守卫的静默错答案）：“rg 非零退出 → 丢掉整个
  * workspace 的候选”，输出仍是“(无命中)”。真实触发路径 = manifest 里还留着 jsonl_path、文件已被删。
  *

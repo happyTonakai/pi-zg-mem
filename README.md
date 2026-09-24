@@ -92,7 +92,7 @@ Then `/reload` (or restart pi). From a local clone, `pi install /absolute/path/t
 **Verify it works**
 
 ```bash
-node --experimental-strip-types --test                # 76 TypeScript tests: no network, no zg, no Python
+node --experimental-strip-types --test                # 77 TypeScript tests: no network, no zg, no Python (10 of them need ripgrep on PATH)
 ```
 
 [CI](.github/workflows/ci.yml) runs the TypeScript suite on Node 22 / 24 across Ubuntu and macOS plus a `tsc --noEmit` typecheck — there is no Python left anywhere in the repo. The end-to-end path (ETL → no-op refresh → incremental refresh → sessions) on the TypeScript runtime is covered permanently by `tests/runtime_boundary.test.ts`, which starts real `node lib/*.ts` subprocesses.
@@ -198,7 +198,7 @@ This indexes **all of your session history** — including thinking blocks and t
 
 ## Status, limits, roadmap
 
-**Working and tested:** the ETL, hybrid + exact recall, drill-down, incremental maintenance, the extension surface. 76 TypeScript tests (`node --experimental-strip-types --test`) and a real-`zg` end-to-end smoke test. The Python design went through independent review ([`docs/reviews/`](docs/reviews/)), and the TypeScript migration added three reviewer rounds on top; both sets of findings and fixes are recorded, the latter in [`docs/plan-ts-migration.md`](docs/plan-ts-migration.md).
+**Working and tested:** the ETL, hybrid + exact recall, drill-down, incremental maintenance, the extension surface. 77 TypeScript tests (`node --experimental-strip-types --test`; 10 of them need ripgrep on PATH) and a real-`zg` end-to-end smoke test. The Python design went through independent review ([`docs/reviews/`](docs/reviews/)), and the TypeScript migration added three reviewer rounds on top; both sets of findings and fixes are recorded, the latter in [`docs/plan-ts-migration.md`](docs/plan-ts-migration.md).
 
 **Migration complete.** The runtime was moved from Python to TypeScript one module at a time, each step with byte-for-byte differential evidence against the Python implementation; module G then deleted the Python implementation, the Python test suite and the differential harnesses. The extension starts `node lib/*.ts` subprocesses (`lib/cli.ts` / `lib/etl.ts`) — the repo contains no Python at all. Plan, per-module evidence and the recorded (unfixed) semantic differences: [`docs/plan-ts-migration.md`](docs/plan-ts-migration.md).
 
@@ -221,7 +221,7 @@ No runtime npm dependencies — the TypeScript code uses only `node:` builtins. 
 # (unpacking pi-coding-agent is 400 MB+ and is not needed for tsc or the tests)
 npm i --no-package-lock --legacy-peer-deps
 npx tsc --noEmit -p tsconfig.json        # same strict config CI runs
-node --experimental-strip-types --test   # 76 tests: no zg, no network, no Python
+node --experimental-strip-types --test   # 77 tests: no zg, no network, no Python (10 need ripgrep on PATH)
 ```
 
 `types/peers.d.ts` declares the pi peer dependencies as ambient modules, which is why nothing

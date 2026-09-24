@@ -92,7 +92,7 @@ pi list          # 确认已注册
 **验证是否正常**
 
 ```bash
-node --experimental-strip-types --test                # 76 个 TypeScript 用例：不联网、不需要 zg、不需要 Python
+node --experimental-strip-types --test                # 77 个 TypeScript 用例：不联网、不需要 zg、不需要 Python（有 10 个用例要 PATH 上有 rg）
 ```
 
 [CI](.github/workflows/ci.yml) 跑：TypeScript 套件（Node 22 / 24，Ubuntu 与 macOS 双平台）与 `tsc --noEmit` 类型检查——仓库里已经没有任何 Python。端到端链路（ETL → 无变化 refresh → 增量 refresh → sessions）在 TypeScript 运行时上由 `tests/runtime_boundary.test.ts` 永久守着（起真 `node lib/*.ts` 子进程）。
@@ -197,7 +197,7 @@ zgc refresh --sessions-dir <dir>           # 增量刷新
 
 ## 现状、边界与后续
 
-**已完成并验证：** ETL、混合 + 精确召回、回指深钻、增量维护、extension 工具暴露。76 个 TypeScript 用例（`node --experimental-strip-types --test`）与真机 `zg` 端到端冒烟。Python 设计经过独立评审（[`docs/reviews/`](docs/reviews/)），TypeScript 迁移过程中又做了三轮 reviewer，两批结论与修复均有记录，后者在 [`docs/plan-ts-migration.md`](docs/plan-ts-migration.md)。
+**已完成并验证：** ETL、混合 + 精确召回、回指深钻、增量维护、extension 工具暴露。77 个 TypeScript 用例（`node --experimental-strip-types --test`，其中 rg 召回链路的 10 个要 PATH 上有 ripgrep）与真机 `zg` 端到端冒烟。Python 设计经过独立评审（[`docs/reviews/`](docs/reviews/)），TypeScript 迁移过程中又做了三轮 reviewer，两批结论与修复均有记录，后者在 [`docs/plan-ts-migration.md`](docs/plan-ts-migration.md)。
 
 **迁移已完成。** 运行时已逐模块从 Python 迁到 TypeScript，每一步都有与 Python 实现逐字节对拍的证据；模块 G 随后删掉了 Python 实现、Python 用例与差分脚手架。扩展走的是 `node lib/*.ts` 子进程（`lib/cli.ts` / `lib/etl.ts`）——仓库里已无任何 Python。计划、逐模块证据与已记录（不修）的语义差异见 [`docs/plan-ts-migration.md`](docs/plan-ts-migration.md)。
 
@@ -220,7 +220,7 @@ zgc refresh --sessions-dir <dir>           # 增量刷新
 # （`pi-coding-agent` 解包 400MB+，tsc 和测试都用不到）
 npm i --no-package-lock --legacy-peer-deps
 npx tsc --noEmit -p tsconfig.json        # 与 CI 相同的严格配置
-node --experimental-strip-types --test   # 76 个用例：不需要 zg、不联网、不需要 Python
+node --experimental-strip-types --test   # 77 个用例：不需要 zg、不联网、不需要 Python（rg 召回那 10 个要 PATH 上有 rg）
 ```
 
 `types/peers.d.ts` 把 pi 的 peer 依赖声明成环境模块，因此不再需要从全局 `pi` 安装里软链

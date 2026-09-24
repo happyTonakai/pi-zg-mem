@@ -37,18 +37,29 @@ jobs:
       # （tests/runtime_boundary.test.ts 会起真子进程跑 node lib/*.ts，假 zg 挂 PATH）。零运行时依赖，不需要 npm ci。
       # 迁移已完成：黄金样本是**冻结**的（生成它的 Python 脚本已随模块 G 删除），
       # 仓库里不再有任何 Python，CI 只剩 Node 这一条判据路径。
+      # 扩展的运行时依赖之一是 ripgrep（另一个 zg 在测试里用假脚本挂 PATH），
+      # 而 runner 镜像不带 rg —— 缺了它，rg 召回那 10 个用例会以 ENOENT 集体失败。
+      - name: Install ripgrep
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            sudo apt-get update -qq && sudo apt-get install -y ripgrep
+          else
+            brew install ripgrep
+          fi
+          rg --version
+
       - name: Run TS regression suite
         run: |
           set -o pipefail
           node --experimental-strip-types --test --test-reporter=tap | tee /tmp/ts-test.tap
           # 发现即失败：用例文件被改名/移走时 node 会以 0 用例 exit 0，必须显式兜底。
-          # 当前 76 个；用 pass+skipped 于是 root 环境下 refresh.test.ts 的 skip（见 refresh.test.ts:280-283）
+          # 当前 77 个；用 pass+skipped 于是 root 环境下 refresh.test.ts 的 skip（见 refresh.test.ts:280-283）
           # 不会把 CI 拉红（普通 runner 上 skipped=0）。加用例时记得同步 bump 这个数字。
           # （--test-reporter=tap 是必须的：node22 默认 TAP、
           # node24 默认 spec，不锁 reporter 这个 grep 会在 22 上失效）
           pass=$(grep -E '^# pass [0-9]+' /tmp/ts-test.tap | tail -1 | awk '{print $3}')
           skipped=$(grep -E '^# skipped [0-9]+' /tmp/ts-test.tap | tail -1 | awk '{print $3}')
-          test "$(( ${pass:-0} + ${skipped:-0} ))" -ge 76
+          test "$(( ${pass:-0} + ${skipped:-0} ))" -ge 77
 
       # 把迁移计划里的两条硬约束变成 CI 断言，而不是靠人记得：
       #   1. 只用可擦除语法 —— 每个模块都要能被 node 直接解析执行（无 enum/namespace/装饰器）
