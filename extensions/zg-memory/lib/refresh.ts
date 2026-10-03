@@ -59,7 +59,7 @@ export interface RefreshResult {
 export interface RefreshDeps {
   /** 一个 session 一份 ETL（对应 Python 起一个 `jsonl2corpus.py` 子进程）。 */
   etlRun?: (globIn: string, corpusDir: string, stderr: (s: string) => void) => etl.EtlResult;
-  /** `zg index`（返回 null=成功 / "lease-active" / 错误文本）。 */
+  /** `zg index`（返回 null=成功 / "lease-active"|"lock-busy"(别人在写,让路) / 错误文本）。 */
   zgIndex?: (corpusDir: string, embedding: string) => string | null;
 }
 
@@ -263,7 +263,8 @@ export function clearIndexStamp(scope: q.Scope): void {
 
 /**
  * py: _run_index() —— 跑 zg 增量索引。
- * 返回 None=成功；"lease-active"=另一个 zg 进程在写本 root；其它=错误文本。
+ * 返回 None=成功；"lease-active"/"lock-busy"=另一个 zg 进程在写本 root（让路，不算失败）；
+ * 其它=错误文本。
  */
 export function runIndex(corpusDir: string, embedding: string): string | null {
   const proc = childProcess.spawnSync("zg", ["index", ".", "--embedding", embedding], {
@@ -280,7 +281,14 @@ export function runIndex(corpusDir: string, embedding: string): string | null {
   if (rc === 0) return null;
   // 顺序要紧：stderr 在前、stdout 在后，最后整体 strip（py 的 `((stderr or "") + (stdout or "")).strip()`）
   const out = q.pyStrip(`${proc.stderr ?? ""}${proc.stdout ?? ""}`);
+  // zg 有两种"别人正在写本 root"的表达，语义相同：这一轮写权轮不到我，让路即可。
+  //   DAEMON_LEASE_ACTIVE —— 有 daemon 拥有写权；
+  //   ZVEC_GREP.ENGINE.LOCK.BUSY —— 普通写锁 home.write 被占（ownerOperation 常见 index.rebuild，
+  //     即同一 workspace 的另一个 pi 窗口在做全量重建）。
+  // 让路是安全的：对方那轮索引扫的就是整个 corpus 目录，我们的分片要么已被它带上，
+  // 要么（它扫得比我们写分片早）由调用方清掉状态戳、下一轮必然补跑。
   if (out.includes("DAEMON_LEASE_ACTIVE")) return "lease-active";
+  if (out.includes("ZVEC_GREP.ENGINE.LOCK.BUSY")) return "lock-busy";
   return out || `zg index 退出码 ${rc}`;
 }
 
@@ -437,11 +445,16 @@ export function runRefresh(
       const warn = markIndexed(scope, fpBefore);
       if (warn) say(warn);
       say(`索引已更新 (${changed.length} changed, ${deleted.length} deleted)`);
-    } else if (indexErr === "lease-active") {
-      // 另一个窗口/仓库的 zg 正在写本 root：不是错误，但绝不能报"索引已更新"
-      // 清掉状态戳 → 下一轮必然会重试（D2/评审 HIGH-1）
+    } else if (indexErr === "lease-active" || indexErr === "lock-busy") {
+      // 另一个窗口/仓库的 zg 正在写本 root：让路，不排队也不在本轮空等。
+      // 绝不能报"索引已更新"，且必须清掉状态戳 —— 对方那轮可能在我们写分片之前就扫过了，
+      // 留着戳会把"这份语料已索引"错误地固化下来（D2/评审 HIGH-1）。
       clearIndexStamp(scope);
-      say("另一个 zg 进程正在写本 workspace 的索引(lease active), 本次未更新索引; 下一轮会重试");
+      say(
+        indexErr === "lease-active"
+          ? "另一个 zg 进程正在写本 workspace 的索引(lease active), 本次未更新索引; 下一轮会重试"
+          : "另一个 zg 进程正在写本 workspace 的索引(写锁被占用), 本次让路不重复建; 语料有变时下一轮会补上",
+      );
     } else {
       clearIndexStamp(scope);
       say(`zg index 失败: ${indexErr}`);

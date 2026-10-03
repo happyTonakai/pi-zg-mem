@@ -188,6 +188,30 @@ test("TestM2IndexRefresh.test_lease_active_does_not_claim_index_updated", () => 
   assert.ok(fs.existsSync(log));
 });
 
+test("TestM2IndexRefresh.test_lock_busy_yields_like_lease_active", () => {
+  // 同一 workspace 的另一个进程在做 `zg index --rebuild` 时，本轮 `zg index` 拿到的是
+  // ZVEC_GREP.ENGINE.LOCK.BUSY（普通写锁），与 DAEMON_LEASE_ACTIVE 同类：让路，不算失败。
+  const env = setup("ws-lockbusy");
+  const p = prepare(env);
+  const { bindir, log } = fakeZg(env, 1, "ZVEC_GREP.ENGINE.LOCK.BUSY: another writer owns home.write");
+  makeMarker(scopeOf(env).corpusDir);
+  fs.appendFileSync(p, `${msgLine("user", "新的问题", T0 + 200_000)}\n`);
+
+  const proc = refresh(env, bindir);
+  assert.equal(proc.code, 0); // 让路不是失败：修前 rc=3 → 扩展侧刷 "Command failed"
+  assert.match(proc.out, /写锁被占用/);
+  assert.ok(!proc.out.includes("索引已更新"), "别人在写索引时绝不能报索引已更新");
+  assert.ok(fs.existsSync(log));
+  assert.ok(!fs.existsSync(rf.indexStampPath(scopeOf(env))), "让路必须清掉状态戳，否则下一轮会误判「已是最新」");
+
+  // 下一轮锁放开：必须真的补跑索引，而不是被状态戳骗成"无变化, 索引已是最新"
+  const ok = fakeZg(env, 0, "indexed 1 files");
+  const pNext = refresh(env, ok.bindir);
+  assert.equal(pNext.code, 0);
+  assert.ok(!pNext.out.includes("索引已是最新"), "上轮让路后不能早退");
+  assert.match(pNext.out, /索引已更新/);
+});
+
 test("TestM2IndexRefresh.test_index_failure_is_reported_and_exits_nonzero", () => {
   const env = setup("ws-fail");
   const p = prepare(env);

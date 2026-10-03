@@ -188,7 +188,10 @@ function scheduleRefresh(sessionsDir: string, ws: string): void {
       }
     }
   }).catch((e) => {
-    console.error("[zg-memory] refresh failed:", e?.message || e);
+    // cli.ts 的诊断全部落在 stdout（execFileAsync 的 message 只带 stderr），别丢——否则
+    // `zg index` 失败/让路时只会看到一句光秃秃的 "Command failed: <cmd>"。
+    const detail = (e?.stdout || e?.stderr || "").toString().trim();
+    console.error("[zg-memory] refresh failed:", e?.message || e, detail ? `\n${detail.slice(-1500)}` : "");
   });
 }
 
